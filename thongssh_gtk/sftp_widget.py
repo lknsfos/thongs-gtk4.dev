@@ -1,6 +1,5 @@
 import gi
 gi.require_version('Gtk', '4.0')
-gi.require_version('Gdk', '4.0')
 from gi.repository import Gtk, Gdk, GLib, Gio
 from gi.repository import GObject # Import GObject for custom sort functions
 import os
@@ -9,6 +8,7 @@ import datetime
 import stat
 import logging
 import threading
+import shutil
 import tempfile
 import queue
 
@@ -67,13 +67,11 @@ class SftpWidget(Gtk.Box):
         self.current_remote_path = None
         self.ui_queue = queue.Queue() # For thread-safe UI updates
 
-        # ✨ For remote file editing
         self.temp_dir = tempfile.mkdtemp(prefix="thongssh_sftp_")
         self.file_monitors = {} # {local_temp_path: (monitor, remote_path)}
         self._log_message(f"Created temporary directory for remote editing: {self.temp_dir}")
 
         # --- ABSOLUTELY FIXED 50/50 LAYOUT ---
-        # A homogeneous Gtk.Box forces its children to be the same size. No sliders, no exceptions.
         # [ Homogeneous Box: [Frame: Local] | [Frame: Remote] ]
         # [ Box: Button > | Button < ]
         # [ Log Panel             ]
@@ -108,7 +106,6 @@ class SftpWidget(Gtk.Box):
         self.button_box.append(download_button)
 
         # 5. The log panel at the bottom.
-        # ✨ Remove the "Log" label from the frame.
         log_frame = Gtk.Frame(height_request=100, vexpand=False)
         log_scrolled = Gtk.ScrolledWindow()
         log_scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
@@ -150,16 +147,13 @@ class SftpWidget(Gtk.Box):
         scrolled_window.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         main_vbox.append(scrolled_window)
 
-        # ✨ Correctly define the ListStore with all 9 columns for data and sorting.
         self.local_store = Gtk.ListStore(str, str, str, GObject.TYPE_INT64, str, int, str, GObject.TYPE_INT64, bool, str)
-        # Wrap the store in a sortable model to enable column header clicking.
         self.local_sortable_model = Gtk.TreeModelSort(model=self.local_store)
         self.local_view = Gtk.TreeView(model=self.local_sortable_model)
         self.local_view.connect("row-activated", self.on_local_row_activated)
 
         scrolled_window.set_child(self.local_view)
 
-        # Columns
         column_definitions = [
             (_("Name"), COL_NAME),
             (_("Size"), COL_SIZE_BYTES),
@@ -167,7 +161,6 @@ class SftpWidget(Gtk.Box):
             (_("Permissions"), None) # Permissions column is not directly sortable
         ]
 
-        # ✨ Add Backspace key press handler for navigating up
         key_controller = Gtk.EventControllerKey.new()
         key_controller.connect("key-pressed", self.on_local_view_key_pressed)
         self.local_view.add_controller(key_controller)
@@ -213,7 +206,6 @@ class SftpWidget(Gtk.Box):
         sort_dir = sort_dir_map.get(self.settings.get("sftp.local_default_sort_direction"), Gtk.SortType.ASCENDING)
         self.local_sortable_model.set_sort_column_id(sort_col, sort_dir)
 
-        # ✨ Connect right-click gesture
         right_click_gesture = Gtk.GestureClick.new()
         right_click_gesture.set_button(Gdk.BUTTON_SECONDARY)
         right_click_gesture.connect("pressed", self.on_view_right_click, self.local_view)
@@ -254,18 +246,15 @@ class SftpWidget(Gtk.Box):
         self.remote_view.connect("row-activated", self.on_remote_row_activated)
         scrolled_window.set_child(self.remote_view)
 
-        # ✨ Add Backspace key press handler for navigating up on remote panel
         key_controller = Gtk.EventControllerKey.new()
         key_controller.connect("key-pressed", self.on_remote_view_key_pressed)
         self.remote_view.add_controller(key_controller)
 
-        # ✨ Connect right-click gesture
         right_click_gesture = Gtk.GestureClick.new()
         right_click_gesture.set_button(Gdk.BUTTON_SECONDARY)
         right_click_gesture.connect("pressed", self.on_view_right_click, self.remote_view)
         self.remote_view.add_controller(right_click_gesture)
 
-        # Columns (identical to local panel)
         column_definitions = [
             (_("Name"), COL_NAME), (_("Size"), COL_SIZE_BYTES),
             (_("Date Modified"), COL_MODIFIED_TS), (_("Permissions"), None) # Permissions column is not sortable
@@ -315,20 +304,17 @@ class SftpWidget(Gtk.Box):
         self.local_path_entry.set_text(path)
 
         try:
-            # ✨ No more pre-sorting. Just read all entries.
             for filename in os.listdir(path):
-                full_path = os.path.join(path, filename)
+                full_path = Path(path) / filename
                 try:
-                    st = os.stat(full_path)
+                    st = full_path.stat()
                     if stat.S_ISDIR(st.st_mode):
                         self.local_store.append([ # Icon, Name, Size Str, Size Bytes, Perms Str, Perms Mode, Modified Str, Modified TS, Is Dir, Full Path (10 elements)
-                            "folder-symbolic", filename, "<DIR>", -1, stat.filemode(st.st_mode), st.st_mode, self._format_date(st.st_mtime), int(st.st_mtime),
-                            True, os.path.join(path, filename)
+                            "folder-symbolic", filename, "<DIR>", -1, stat.filemode(st.st_mode), st.st_mode, self._format_date(st.st_mtime), int(st.st_mtime), True, str(full_path)
                         ])
                     else:
                         self.local_store.append([ # Icon, Name, Size Str, Size Bytes, Perms Str, Perms Mode, Modified Str, Modified TS, Is Dir, Full Path (10 elements)
-                            "document-symbolic", filename, self._format_size(st.st_size), st.st_size, stat.filemode(st.st_mode), st.st_mode, self._format_date(st.st_mtime), int(st.st_mtime),
-                            False, os.path.join(path, filename)
+                            "document-symbolic", filename, self._format_size(st.st_size), st.st_size, stat.filemode(st.st_mode), st.st_mode, self._format_date(st.st_mtime), int(st.st_mtime), False, str(full_path)
                         ])
                 except (OSError, PermissionError):
                     continue
@@ -402,7 +388,6 @@ class SftpWidget(Gtk.Box):
             self._log_message(_("Error: host is not set in the config."), is_error=True)
             return
 
-        # ✨ If no user is specified, prompt for one, just like in the terminal.
         if '@' not in host_str:
             dialog = InputDialog(
                 self.get_root(),
@@ -429,7 +414,6 @@ class SftpWidget(Gtk.Box):
         cfg = self.host_config
         host_str = cfg.get("host", "")
         
-        # ✨ Correctly parse user and host
         if '@' in host_str:
             user, host = host_str.split('@', 1)
         elif username_from_prompt:
@@ -442,8 +426,6 @@ class SftpWidget(Gtk.Box):
         port = int(cfg.get("port") or 22)
         key_filename = cfg.get("key_path")
         
-        # --- ✨ New Connection Logic ---
-        # 1. Try with provided auth_password (if any)
         if auth_password:
             try:
                 self._log_message(_("Attempting connection with provided password..."))
@@ -452,14 +434,12 @@ class SftpWidget(Gtk.Box):
                 self.ssh_client.connect(host, port=port, username=user, password=auth_password, timeout=10, allow_agent=False, look_for_keys=False)
                 self.sftp_client = self.ssh_client.open_sftp()
                 self._log_message(_("SFTP connection established successfully with provided password."))
-                # If successful, proceed to load remote directory and enable buttons
                 initial_path = self.sftp_client.normalize('.')
                 self._load_remote_directory(initial_path)
                 self.ui_queue.put(lambda: self.button_box.set_sensitive(True))
-                return # Connection successful, exit worker
+                return
             except Exception as e:
                 self._log_message(_("Provided password authentication failed: {e}").format(e=e), is_error=True)
-                # Fall through to other methods if provided password failed
 
         # 2. Try with key first, if it exists and no auth_password was successful.
         if key_filename and not self.sftp_client: # Only try key if not already connected
@@ -481,10 +461,9 @@ class SftpWidget(Gtk.Box):
                     )
                     dialog.run_async(lambda passphrase: self._start_sftp_worker_with_user(username_from_prompt, key_passphrase=passphrase, auth_password=None))
                 GLib.idle_add(prompt_for_key_password)
-                return # Stop this worker, a new one will be started.
+                return
             except paramiko.AuthenticationException:
                 self._log_message(_("Key authentication failed. Falling back to password..."))
-                # Let the code below handle password auth
                 pass
             except Exception as e:
                 self._log_message(_("SFTP connection failed with key: {e}").format(e=e), is_error=True)
@@ -519,7 +498,7 @@ class SftpWidget(Gtk.Box):
                         else:
                             self._log_message(_("Connection canceled."), is_error=True)
                     dialog.run_async(on_password_entered)
-                GLib.idle_add(prompt_for_password)
+                self.ui_queue.put(prompt_for_password)
                 return # Stop this worker
 
         # 3. If connection was successful (either by key or password)
@@ -800,8 +779,6 @@ class SftpWidget(Gtk.Box):
     def _log_message(self, message, is_error=False):
         """Appends a message to the log view in a thread-safe way."""
         def append_log():
-            # ✨ Check if the user is scrolled to the bottom before appending.
-            # This prevents auto-scrolling if the user is reading old logs.
             scroll_adj = self.log_view.get_parent().get_vadjustment()
             is_at_bottom = (scroll_adj.get_value() >= scroll_adj.get_upper() - scroll_adj.get_page_size() - 5) # 5px tolerance
 
@@ -811,10 +788,7 @@ class SftpWidget(Gtk.Box):
             end_iter = buf.get_end_iter()
             buf.insert(end_iter, log_line)
 
-            # ✨ Only scroll if the view was already at the bottom.
             if is_at_bottom:
-                # ✨ To prevent invalid iterator warnings, we create a function that gets
-                # the end iterator *at the moment of execution*, not when it's scheduled.
                 def do_scroll():
                     end_iter = self.log_view.get_buffer().get_end_iter()
                     self.log_view.scroll_to_iter(end_iter, 0.0, True, 0.0, 1.0)
@@ -835,7 +809,6 @@ class SftpWidget(Gtk.Box):
         if self.sftp_client: self.sftp_client.close()
         if self.ssh_client: self.ssh_client.close()
 
-        # ✨ Clean up file monitors and temporary directory
         for monitor, _ in self.file_monitors.values():
             monitor.cancel()
         self.file_monitors.clear()
@@ -849,7 +822,6 @@ class SftpWidget(Gtk.Box):
 
     def setup_actions_and_popovers(self):
         """Creates GActions and PopoverMenus for context menus."""
-        # ✨ Create an action group for this widget and insert it with the "sftp" prefix.
         self.sftp_action_group = Gio.SimpleActionGroup()
         self.insert_action_group("sftp", self.sftp_action_group)
 
@@ -894,17 +866,14 @@ class SftpWidget(Gtk.Box):
         self.last_clicked_view = view
         model = view.get_model()
 
-        # ✨ Enable "Change Permissions" for any valid file/dir, but disable for ".."
         chmod_action = self.sftp_action_group.lookup_action("chmod-file")
         if model.get_value(model.get_iter(path), COL_NAME) == "..":
             if chmod_action: chmod_action.set_enabled(False)
         else:
             if chmod_action: chmod_action.set_enabled(True)
 
-        # ✨ Translate coordinates from the clicked view's system to the parent widget's system.
         translated_x, translated_y = view.translate_coordinates(self, x, y)
 
-        # Create a rectangle at the translated cursor position.
         rect = Gdk.Rectangle()
         rect.x = int(translated_x)
         rect.y = int(translated_y)

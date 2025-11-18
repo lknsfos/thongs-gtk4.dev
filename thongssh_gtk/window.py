@@ -29,9 +29,6 @@ _ = lambda s: s
 # --- Main Window ---
 class ThongSSHWindow(Adw.ApplicationWindow):
 
-    # ✨ Debug line: print the path to this file on start
-    logging.debug(f"Window file loaded from: {__file__}")
-
     open_sessions = {}
     tab_data = {} # ✨ Store config for each tab widget
     force_close_tabs = set() # ✨ Set of tab widgets to force close
@@ -41,10 +38,8 @@ class ThongSSHWindow(Adw.ApplicationWindow):
 
         self.set_default_size(1024, 768)
 
-        # Tell the window it CAN be closed (for the 'X' button)
         self.set_deletable(True)
 
-        # ✨ Set the icon name to make it work in GNOME
         self.set_icon_name(APP_ID)
 
         # Load and migrate the config
@@ -70,7 +65,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         title_widget = Adw.WindowTitle(title="ThongSSH", subtitle="0.3.10-dev")
         header_bar.set_title_widget(title_widget)
 
-        # ✨ Add the global menu
         self.setup_global_menu(header_bar)
         self.main_box.append(header_bar)
 
@@ -151,7 +145,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         self.tree_view.set_headers_visible(False)
 
         # Disable the old built-in search, as we now have our own SearchBar
-        self.tree_view.set_enable_search(False)
 
 
         # Renderers
@@ -184,9 +177,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         left_click_gesture.connect("pressed", self.on_tree_left_click)
         self.tree_view.add_controller(left_click_gesture)
 
-        # ✨ GUARANTEED interception of Ctrl+F and other keys
-        # This controller catches events BEFORE the TreeView receives them,
-        # thanks to the CAPTURE phase. This blocks the standard search.
         key_controller = Gtk.EventControllerKey.new()
         key_controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         key_controller.connect("key-pressed", self.on_tree_key_pressed)
@@ -194,14 +184,12 @@ class ThongSSHWindow(Adw.ApplicationWindow):
 
         self.setup_search_signals()
 
-        # ✨ Add the SearchBar to the very bottom, BEFORE the buttons
         self.left_panel.append(self.search_bar)
 
         # --- (GTK4 Menu) ---
         self.setup_actions_and_popovers()
         # --- ---
 
-        # Buttons under the tree
         button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         button_box.set_halign(Gtk.Align.CENTER)
 
@@ -237,13 +225,8 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         self.paned.set_end_child(self.notebook)
         
         # ✨ Add a small margin to prevent accidentally grabbing the paned handle
-        self.notebook.set_margin_start(6)
-
-        # ✨ Set initial paned position after the window is mapped
         self.connect("map", self.on_first_map)
 
-
-        # ✨ "Welcome" tab REMOVED
 
         # On exit, save the tree back to JSON
         atexit.register(self.rebuild_config_and_save)
@@ -261,9 +244,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
     def setup_css(self):
         """Applies custom CSS to the application."""
         css_provider = Gtk.CssProvider()
-        # CSS to hide the check/radio indicator on menu items that start with '>_'
-        # This is a bit of a hack, but it targets the label's content.
-        # It tells GTK to not display the icon placeholder for these specific items.
         css_data = """
         menuitem > label[label^=">_"] {
             -gtk-icon-source: none;
@@ -379,7 +359,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         search_mode_active = not self.search_bar.get_search_mode()
         self.search_bar.set_search_mode(search_mode_active)
         if search_mode_active:
-            # ✨ When search is called again, the search entry should be cleared
             self.search_entry.set_text("")
             self.search_entry.grab_focus()
 
@@ -552,10 +531,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         action_about.connect("activate", self.on_menu_about)
         self.add_action(action_about)
 
-        # Use existing actions for editing
-        # self.add_action(self.lookup_action("edit"))
-        # self.add_action(self.lookup_action("delete"))
-
         # 2. Create GMenu (model)
         main_menu_model = Gio.Menu()
 
@@ -615,7 +590,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
 
         # 1. Create GActions (actions)
 
-        # ✨ Actions used in both the main menu and the context menu
         action_connect = Gio.SimpleAction.new("connect", None)
         action_connect.connect("activate", self.on_menu_connect_host)
         self.add_action(action_connect)
@@ -648,7 +622,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         action_delete.connect("activate", self.on_remove_selected_clicked)
         self.add_action(action_delete)
 
-        # ✨ Actions for the terminal
         action_copy = Gio.SimpleAction.new("copy-clipboard", None)
         action_copy.connect("activate", self.on_menu_copy)
         self.add_action(action_copy)
@@ -657,7 +630,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         action_paste.connect("activate", self.on_menu_paste)
         self.add_action(action_paste)
         
-        # ✨ Action for user commands (will be parameterized)
         action_user_cmd = Gio.SimpleAction.new_stateful("user-command", GLib.VariantType.new('s'), GLib.Variant.new_string(""))
         action_user_cmd.connect("activate", self.on_menu_user_command)
         self.add_action(action_user_cmd)
@@ -666,7 +638,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         action_open_ssh = Gio.SimpleAction.new("open-ssh-from-tab", None)
         action_open_ssh.connect("activate", self.on_menu_open_ssh_from_tab)
         self.add_action(action_open_ssh)
-        # ✨ Actions for the TAB context menu
         action_tab_disconnect = Gio.SimpleAction.new("tab-disconnect", None)
         action_tab_disconnect.connect("activate", self.on_menu_tab_disconnect)
         self.add_action(action_tab_disconnect)
@@ -689,7 +660,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         host_menu.append(_("Clone"), "win.clone")
         host_menu.append(_("Connect SFTP"), "win.open-sftp")
         host_menu.append(_("Delete"), "win.delete")
-        # ✨ Add a section for user commands, which will be populated dynamically
         self.user_commands_menu_section = Gio.Menu()
         host_menu.append_section(None, self.user_commands_menu_section)
 
@@ -698,12 +668,10 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         group_menu.append(_("Rename..."), "win.rename")
         group_menu.append(_("Delete"), "win.delete")
 
-        # ✨ Menu for the TERMINAL
         terminal_menu = Gio.Menu()
         terminal_menu.append(_("Copy"), "win.copy-clipboard")
         terminal_menu.append(_("Paste"), "win.paste-clipboard")
 
-        # ✨ Menu for a TAB
         tab_menu = Gio.Menu()
         tab_menu.append(_("Disconnect"), "win.tab-disconnect")
         tab_menu.append(_("Reconnect"), "win.tab-reconnect")
@@ -714,7 +682,7 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         # 3. Create Popover (widgets)
         self.popover_host = Gtk.PopoverMenu.new_from_model(host_menu)
         self.popover_group = Gtk.PopoverMenu.new_from_model(group_menu)
-        self.popover_terminal = Gtk.PopoverMenu.new_from_model(terminal_menu)
+        self.popover_terminal = Gtk.PopoverMenu.new_from_model(terminal_menu) # TODO: Check if this is used
         self.popover_tab = Gtk.PopoverMenu.new_from_model(tab_menu) # ✨ New popover for tabs
         self.popover_host.set_parent(self) # Set parent once to the main window
         self.popover_terminal.connect("closed", self.on_popover_terminal_closed)
@@ -738,10 +706,8 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             # Get the row's rectangle to "attach" the popover to
             rect = tree_view.get_cell_area(path, col)
 
-            # ✨ Dynamically build user commands for the host menu
             self.build_user_commands_menu()
 
-            # ✨ Explicitly set action states before showing the menu to fix the bug.
             self.lookup_action("connect").set_enabled(True)
             self.lookup_action("open-sftp").set_enabled(True)
             self.lookup_action("edit").set_enabled(True)
@@ -774,7 +740,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         for i, command_data in enumerate(user_commands):
             name = command_data.get("name")
             if name:
-                # ✨ Add a terminal-like prefix instead of an icon
                 label = f">_ {name}"
                 menu_item = Gio.MenuItem.new(label, f"win.user-command('{name}')")
                 self.user_commands_menu_section.append_item(menu_item)
@@ -810,8 +775,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         self.lookup_action("copy-clipboard").set_enabled(terminal.get_has_selection())
         self.lookup_action("paste-clipboard").set_enabled(True) # Paste is always allowed
 
-        # ✨ Translate coordinates from the terminal widget's system to the window's system
-        # This is necessary because the popover is attached to the main window (self)
         translated_x, translated_y = terminal.translate_coordinates(self, x, y)
 
         # Show the popover
@@ -838,8 +801,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
 
     def on_popover_terminal_closed(self, popover):
         """Gives focus back to the active terminal when the context menu is closed."""
-        # Use idle_add to ensure this runs after the popover has fully closed
-        # and the UI is ready to accept focus changes.
         def refocus():
             terminal = self.get_active_terminal()
             if terminal: terminal.grab_focus()
@@ -891,7 +852,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
 
 
 
-
     # --- Handlers for the global menu ---
     def on_menu_close_tab(self, action, param):
         """Closes the active tab."""
@@ -922,7 +882,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
 
     def on_menu_settings(self, action, param):
         """Placeholder for the settings dialog."""
-        # ✨ Импортируем здесь, чтобы избежать циклической зависимости
         from .dialogs import SettingsDialog
         logging.info("Settings dialog called.")
         dialog = SettingsDialog(self, self.settings_manager)
@@ -1228,7 +1187,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             password = self.keyring.load_password(config.get("name"))
 
             # --- 6.2. Сборка команды SSH ---
-            # ✨ Use password only if it exists AND a user is specified in the host string
             if password and "@" in host_str:
                 # Use sshpass if a password is set
                 sshpass_path = self.settings_manager.get("client.sshpass_path")
@@ -1302,7 +1260,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         try:
             terminal = Vte.Terminal()
 
-            # ✨ Применяем настройки из SettingsManager
             scrollback = self.settings_manager.get("terminal.scrollback_lines")
             font_str = self.settings_manager.get("terminal.font")
             scheme_key = self.settings_manager.get("terminal.color_scheme")
@@ -1326,25 +1283,20 @@ class ThongSSHWindow(Adw.ApplicationWindow):
                     background=parse_color(colors["background"]),
                     palette=palette
                 )
-            # --- Конец применения настроек ---
 
             terminal.set_vexpand(True)
             terminal.set_hexpand(True)
 
-            # ✨ Add a right-click handler for the terminal
             right_click_gesture = Gtk.GestureClick.new()
             right_click_gesture.set_button(Gdk.BUTTON_SECONDARY)
             right_click_gesture.connect("pressed", self.on_terminal_right_click)
             terminal.add_controller(right_click_gesture)
 
-            # ✨ Add a key controller to the terminal to intercept Ctrl+W
             key_controller_terminal = Gtk.EventControllerKey.new()
-            # Set to CAPTURE phase to ensure it runs before Vte.Terminal's internal handlers
             key_controller_terminal.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
             key_controller_terminal.connect("key-pressed", self.on_terminal_key_pressed)
             terminal.add_controller(key_controller_terminal)
 
-            # ✨ Add a scroll controller for font scaling (Ctrl+Scroll)
             scroll_controller = Gtk.EventControllerScroll.new(flags=Gtk.EventControllerScrollFlags.VERTICAL)
             scroll_controller.connect("scroll", self.on_terminal_scroll)
             terminal.add_controller(scroll_controller)
@@ -1378,9 +1330,7 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             page_num = self.notebook.append_page(scrolled_term, tab_label_box)
             self.notebook.set_current_page(page_num)
 
-            # ✨ FOCUS FIX
             terminal.grab_focus()
-            # --- END OF FIX ---
 
             self.open_sessions[scrolled_term] = (terminal, pid)
             # ✨ Store config for this tab
@@ -1412,7 +1362,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         close_btn.add_css_class("flat")
         tab_label_box.append(close_btn)
 
-        # ✨ Add right-click context menu to the tab label
         right_click_gesture = Gtk.GestureClick.new()
         right_click_gesture.set_button(Gdk.BUTTON_SECONDARY)
         right_click_gesture.connect("pressed", self.on_tab_right_click)
@@ -1422,13 +1371,10 @@ class ThongSSHWindow(Adw.ApplicationWindow):
 
     def on_tab_right_click(self, gesture, n_press, x, y):
         """Shows the context menu for a notebook tab."""
-        # ✨ Prevent the default handler from running, which can cause issues.
         gesture.set_state(Gtk.EventSequenceState.CLAIMED)
 
-        # Get the widget that was clicked (the tab's Gtk.Box label)
         tab_label_box = gesture.get_widget()
 
-        # ✨ Find the actual page widget corresponding to the clicked tab label
         page_widget = None
         for i in range(self.notebook.get_n_pages()):
             child = self.notebook.get_nth_page(i)
@@ -1436,8 +1382,7 @@ class ThongSSHWindow(Adw.ApplicationWindow):
                 page_widget = child
                 break
         
-        # ✨ Dynamically enable/disable the "Connect SFTP" action
-        sftp_action = self.lookup_action("open-sftp") # For terminal -> sftp
+        sftp_action = self.lookup_action("open-sftp")
         ssh_action = self.lookup_action("open-ssh-from-tab") # For sftp -> terminal
 
         if page_widget and page_widget in self.tab_data:
@@ -1448,10 +1393,8 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             sftp_action.set_enabled(False)
             ssh_action.set_enabled(False)
 
-        # ✨ Translate coordinates from the tab label's system to the main window's system.
         translated_x, translated_y = tab_label_box.translate_coordinates(self, x, y)
 
-        # Create a rectangle at the correct, translated position.
         rect = Gdk.Rectangle()
         rect.x, rect.y, rect.width, rect.height = int(translated_x), int(translated_y), 1, 1
         self.popover_tab.set_pointing_to(rect)
@@ -1461,7 +1404,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         """Handles key presses directly on the Vte.Terminal widget."""
         is_ctrl = modifier & Gdk.ModifierType.CONTROL_MASK
 
-        # Intercept Ctrl+W to close the current tab
         if is_ctrl and keyval == Gdk.KEY_w:
             self.on_menu_close_tab(None, None)
             return True # Event handled, stop propagation
@@ -1469,7 +1411,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
 
     def on_terminal_scroll(self, controller, dx, dy):
         """Handles Ctrl+Scroll to change font size in the terminal."""
-        # Check if Ctrl is pressed
         modifiers = controller.get_current_event_state()
         if not (modifiers & Gdk.ModifierType.CONTROL_MASK):
             return False # Propagate event if Ctrl is not held
@@ -1479,7 +1420,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             return False
 
         font_desc = terminal.get_font()
-        # get_size() returns size in Pango units, we need it in points
         current_size_pts = font_desc.get_size() / Pango.SCALE
 
         # dy < 0 is scroll up (zoom in), dy > 0 is scroll down (zoom out)
@@ -1488,7 +1428,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         else:
             new_size_pts = current_size_pts - 1
 
-        # Set the new size (set_size expects Pango units)
         font_desc.set_size(int(new_size_pts * Pango.SCALE))
         terminal.set_font(font_desc)
 
@@ -1515,10 +1454,8 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         """Handles the 'child-exited' signal from Vte.Terminal."""
         logging.debug(f"VTE child process exited with status {status} for widget {tab_widget}.")
 
-        # ✨ Check if this tab was marked for forced closure by the user.
         is_forced = tab_widget in self.force_close_tabs
 
-        # ✨ Check the setting before closing the tab
         if is_forced or self.settings_manager.get("terminal.close_on_disconnect"):
             if is_forced: self.force_close_tabs.remove(tab_widget)
             self.close_tab(widget=tab_widget)
@@ -1528,8 +1465,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             terminal.feed_child(exit_message.encode('utf-8'))
             # Make the terminal read-only
             terminal.set_input_enabled(False)
-            # Optionally, change the tab title
-            # You might need to find the tab_label associated with this tab_widget
 
     def close_tab(self, widget):
         """Uses .remove_page()"""
@@ -1538,19 +1473,15 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             if page_num != -1:
                  self.notebook.remove_page(page_num)
             
-            # ✨ After closing a tab, if another one is active, set focus to its terminal
-            # Use idle_add to ensure focus is set after the UI has settled.
             if self.notebook.get_n_pages() > 0:
                 def focus_active_terminal():
                     active_terminal = self.get_active_terminal()
                     if active_terminal: active_terminal.grab_focus()
                 GLib.idle_add(focus_active_terminal)
 
-            # ✨ Clean up tab data
             if widget in self.tab_data:
                 del self.tab_data[widget]
 
-            # ✨ Clean up force_close_tabs set as well
             if widget in self.force_close_tabs:
                 self.force_close_tabs.remove(widget)
 

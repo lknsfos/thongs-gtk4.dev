@@ -2,7 +2,6 @@ import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GObject, Pango
-import shutil # For recursive local delete
 import stat
 
 from .constants import COL_NAME, COL_TYPE
@@ -13,7 +12,6 @@ from .keyring import KeyringManager
 # Placeholder for future internationalization (i18n)
 _ = lambda s: s
 
-# --- ✨ NEW CLASS: Universal Input Dialog ---
 class InputDialog(Adw.Window):
     """
     A simple dialog with a single text entry.
@@ -24,7 +22,7 @@ class InputDialog(Adw.Window):
     }
 
     def __init__(self, parent, title, message, default_text="", is_password=False):
-        super().__init__(transient_for=parent, modal=True) # is_password is a custom flag
+        super().__init__(transient_for=parent, modal=True)
         self.set_default_size(400, -1)
 
         # --- HeaderBar ---
@@ -45,7 +43,6 @@ class InputDialog(Adw.Window):
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         main_box.append(header_bar)
 
-        # ✨ Use valign to center the content vertically instead of expanding
         content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=24, margin_bottom=24, margin_start=12, margin_end=12,
                               valign=Gtk.Align.CENTER)
         main_box.append(content_box)
@@ -60,7 +57,6 @@ class InputDialog(Adw.Window):
         if is_password:
             self.entry.set_visibility(False) # Hide text for passwords
         self.entry.connect("changed", self.on_validate)
-        # Allow activating the OK button on Enter press
         self.entry.connect("activate", lambda e: self.ok_button.get_sensitive() and self.response(Gtk.ResponseType.OK))
         content_box.append(self.entry)
 
@@ -88,7 +84,6 @@ class InputDialog(Adw.Window):
         self.connect("response", on_response)
         self.present()
 
-# --- ✨ NEW CLASS: Message Dialog (Adw.MessageDialog wrapper) ---
 class MessageDialog(Adw.Window):
     """
     A simple wrapper around Adw.MessageDialog to provide an async run method.
@@ -102,7 +97,7 @@ class MessageDialog(Adw.Window):
         self.set_default_size(400, -1)
 
         self.dialog = Adw.MessageDialog(
-            transient_for=self, # Set parent to this wrapper window
+            transient_for=self,
             heading=heading,
             body=body
         )
@@ -121,7 +116,6 @@ class MessageDialog(Adw.Window):
         self.dialog.set_default_response(str(Gtk.ResponseType.OK))
         self.dialog.set_close_response(str(Gtk.ResponseType.CANCEL))
 
-        # Adw.MessageDialog is a Gtk.Widget, so we can set it as content
         self.set_content(self.dialog)
 
     def response(self, response_id):
@@ -137,8 +131,6 @@ class MessageDialog(Adw.Window):
         self.dialog.connect("response", on_response)
         self.present()
 
-
-# --- ✨ NEW CLASS: Permissions/Chmod Dialog ---
 class PermissionsDialog(Adw.Window):
     """A dialog for viewing and editing file permissions (chmod)."""
 
@@ -173,7 +165,6 @@ class PermissionsDialog(Adw.Window):
 
         # --- Checkboxes ---
         grid = Gtk.Grid(column_spacing=12, row_spacing=6)
-        # ✨ Use grid.attach instead of grid.append
         grid.attach(Gtk.Label(label="", xalign=0), 0, 0, 1, 1) # Spacer
         grid.attach(Gtk.Label(label=_("Read"), halign=Gtk.Align.CENTER), 1, 0, 1, 1)
         grid.attach(Gtk.Label(label=_("Write"), halign=Gtk.Align.CENTER), 2, 0, 1, 1)
@@ -262,7 +253,6 @@ class PermissionsDialog(Adw.Window):
         self.connect("response", on_response)
         self.present()
 
-# --- ✨ CLASS: Add/Edit Host Dialog ---
 class HostDialog(Adw.Window):
 
     __gsignals__ = {
@@ -305,7 +295,6 @@ class HostDialog(Adw.Window):
         group_main.set_title(_("Basic Settings"))
         page.add(group_main)
 
-        # ✨ Protocol Selection
         self.protocol_row = Adw.ComboRow(title=_("Protocol"), model=Gtk.StringList.new(["SSH", "Telnet"]))
         self.protocol_row.connect("notify::selected-item", self.on_protocol_changed)
         group_main.add(self.protocol_row)
@@ -384,11 +373,9 @@ class HostDialog(Adw.Window):
                                                 subtitle=_("Enables the -X flag (ForwardX11)"))
         self.group_ssh_opts.add(self.switch_forward_x)
 
-        # ✨ NEW OPTION
         self.switch_agent = Adw.SwitchRow(title=_("ssh-agent Forwarding"),
                                              subtitle=_("Enables the -A flag (ForwardAgent)"))
         self.group_ssh_opts.add(self.switch_agent)
-        # --- КОНЕЦ ---
 
         # Extra options (ActionRow + Gtk.Entry)
         row_options = Adw.ActionRow(title=_("Extra SSH Options"),
@@ -415,7 +402,6 @@ class HostDialog(Adw.Window):
         if self.is_edit_mode:
             self.populate_fields()
 
-        # ✨ Initially hide irrelevant options
         self.on_protocol_changed(self.protocol_row, None)
 
 
@@ -436,7 +422,6 @@ class HostDialog(Adw.Window):
         has_user = "@" in entry.get_text()
         self.password_row.set_sensitive(has_user)
         if not has_user:
-            # ✨ If user is removed, also clear any saved password from the keyring
             if self.is_edit_mode and self.keyring.load_password(self.entry_name.get_text().strip()):
                 self.keyring.clear_password(self.entry_name.get_text().strip())
                 self.clear_password_button.set_sensitive(False)
@@ -548,7 +533,7 @@ class HostDialog(Adw.Window):
 
         self.switch_compat.set_active(cfg.get("compat_old_systems", False))
         self.switch_forward_x.set_active(cfg.get("forward_x", False))
-        self.switch_agent.set_active(cfg.get("forward_agent", False)) # ✨ Added
+        self.switch_agent.set_active(cfg.get("forward_agent", False))
         self.entry_options.set_text(cfg.get("ssh_options", "") or "")
 
         self.switch_telnet_binary.set_active(cfg.get("telnet_binary", False))
@@ -722,9 +707,6 @@ class GroupDialog(Adw.Window):
 
 
 
-
-
-
 # --- CLASS: Settings Dialog ---
 class SettingsDialog(Adw.Window):
     def __init__(self, parent_window, settings_manager):
@@ -733,10 +715,8 @@ class SettingsDialog(Adw.Window):
 
         self.set_default_size(600, 450)
 
-        # --- ✨ HeaderBar ---
         header_bar = Adw.HeaderBar()
 
-        # --- ✨ Vertical Navigation Layout ---
         self.stack = Adw.ViewStack()
 
         # --- Terminal Page ---
@@ -789,7 +769,6 @@ class SettingsDialog(Adw.Window):
         )
         group_behavior.add(self.scrollback_row)
 
-        # ✨ NEW: Close on disconnect switch
         self.close_on_disconnect_row = Adw.SwitchRow(
             title=_("Close tab on disconnect"),
             subtitle=_("Automatically close the terminal tab when the session ends")
@@ -860,7 +839,6 @@ class SettingsDialog(Adw.Window):
         buttons_box.append(remove_button)
         commands_box.append(buttons_box)
 
-        # ✨ Add a note explaining the variables
         note_label = Gtk.Label(
             label=_("Commands for the host's context menu.\nAvailable variables: $name, $host, $user"),
             halign=Gtk.Align.START,
@@ -870,7 +848,6 @@ class SettingsDialog(Adw.Window):
 
         group_commands.add(commands_box)
 
-        # --- ✨ Create NavigationSplitView ---
         # --- SFTP Page ---
         page_sftp = Adw.PreferencesPage()
         page_sftp.set_title(_("SFTP"))
@@ -932,7 +909,6 @@ class SettingsDialog(Adw.Window):
         split_view.set_content(Adw.NavigationPage.new(self.stack, ""))
         split_view.set_vexpand(True)
 
-        # --- ✨ Add buttons to HeaderBar ---
         header_bar.set_title_widget(Adw.WindowTitle(title=_("Settings")))
         apply_button = Gtk.Button(label=_("Apply"), css_classes=["suggested-action"])
         apply_button.connect("clicked", self.on_apply)
