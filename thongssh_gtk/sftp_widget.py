@@ -133,10 +133,15 @@ class SftpWidget(Gtk.Box):
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         up_button = Gtk.Button(icon_name="go-up-symbolic")
         up_button.connect("clicked", self.on_local_up_clicked)
+        refresh_button = Gtk.Button(icon_name="view-refresh-symbolic")
+        refresh_button.connect("clicked", self.on_local_refresh_clicked)
+        refresh_button.set_tooltip_text(_("Refresh"))
+
         self.local_path_entry = Gtk.Entry()
         self.local_path_entry.set_hexpand(True) # Allow the entry to fill the space
         self.local_path_entry.connect("activate", self.on_local_path_activated)
         toolbar.append(up_button)
+        toolbar.append(refresh_button)
         toolbar.append(self.local_path_entry)
         main_vbox.append(toolbar)
 
@@ -226,10 +231,15 @@ class SftpWidget(Gtk.Box):
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         up_button = Gtk.Button(icon_name="go-up-symbolic")
         up_button.connect("clicked", self.on_remote_up_clicked)
+        refresh_button = Gtk.Button(icon_name="view-refresh-symbolic")
+        refresh_button.connect("clicked", self.on_remote_refresh_clicked)
+        refresh_button.set_tooltip_text(_("Refresh"))
+
         self.remote_path_entry = Gtk.Entry()
         self.remote_path_entry.set_hexpand(True)
         self.remote_path_entry.connect("activate", self.on_remote_path_activated)
         toolbar.append(up_button)
+        toolbar.append(refresh_button)
         toolbar.append(self.remote_path_entry)
         main_vbox.append(toolbar)
 
@@ -666,6 +676,16 @@ class SftpWidget(Gtk.Box):
         parent_path = os.path.dirname(self.current_local_path)
         if parent_path != self.current_local_path: # Avoid getting stuck at "/"
             self._load_local_directory(parent_path)
+
+    def on_local_refresh_clicked(self, button):
+        """Handles the 'Refresh' button click for the local panel."""
+        if self.current_local_path:
+            self._load_local_directory(self.current_local_path)
+
+    def on_remote_refresh_clicked(self, button):
+        """Handles the 'Refresh' button click for the remote panel."""
+        if self.current_remote_path:
+            self._load_remote_directory_threaded(self.current_remote_path)
 
     def on_local_path_activated(self, entry):
         """Handles Enter press in the path entry."""

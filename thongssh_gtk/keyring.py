@@ -7,7 +7,7 @@ from .constants import APP_ID
 
 # Схема для хранения паролей в системной связке ключей.
 # Атрибуты помогают однозначно идентифицировать запись.
-SCHEMA = Secret.Schema.new("com.example.thongssh.password",
+SCHEMA = Secret.Schema.new("com.example.thongssh.dev.password",
                            Secret.SchemaFlags.NONE,
                            {
                                "app_id": Secret.SchemaAttributeType.STRING,

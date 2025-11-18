@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 # --- Global Constants ---
-CONFIG_DIR = Path.home() / ".config" / "thongssh"
+CONFIG_DIR = Path.home() / ".config" / "thongssh-dev"
 CONFIG_FILE = CONFIG_DIR / "hosts.json" 
 from gi.repository import GLib
 
