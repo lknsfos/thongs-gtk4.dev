@@ -30,8 +30,8 @@ To get this party started, you'll need a few things.
 
 ### For Ubuntu / Debian Babes:
 ```bash
-# Install system libraries for GTK4, terminal, and the actual clients
-sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-vte-3.91 openssh-client telnet python3-paramiko
+# Install system libraries for GTK4, terminal, secret storage (gnome-keyring), and the actual clients
+sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-vte-3.91 gnome-keyring gir1.2-secret-1 openssh-client telnet python3-paramiko
 ```
 
 ### For Fedora / RHEL Cuties:

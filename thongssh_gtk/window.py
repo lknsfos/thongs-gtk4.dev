@@ -62,7 +62,7 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         header_bar = Adw.HeaderBar()
         header_bar.set_show_end_title_buttons(True) # Shows min/max/close
 
-        title_widget = Adw.WindowTitle(title="ThongSSH", subtitle="0.3.10-dev")
+        title_widget = Adw.WindowTitle(title="ThongSSH", subtitle="0.3.11-dev")
         header_bar.set_title_widget(title_widget)
 
         self.setup_global_menu(header_bar)
@@ -896,7 +896,7 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         """Shows the 'About' window."""
         dialog = Adw.AboutWindow(transient_for=self)
         dialog.set_application_name("ThongSSH") # No "dev" in application name
-        dialog.set_version("0.3.10-dev") # dev version
+        dialog.set_version("0.3.11-dev") # dev version
         dialog.set_license_type(Gtk.License.GPL_3_0)
         dialog.set_comments(_("SSH client with a tree-like host structure"))
         dialog.set_copyright("© 2025 Mikhael Karpov")

@@ -25,21 +25,18 @@ class InputDialog(Adw.Window):
         super().__init__(transient_for=parent, modal=True)
         self.set_default_size(400, -1)
 
-        # --- HeaderBar ---
         header_bar = Adw.HeaderBar()
         header_bar.set_title_widget(Adw.WindowTitle(title=title))
 
         self.ok_button = Gtk.Button(label=_("OK"))
         self.ok_button.add_css_class("suggested-action")
         self.ok_button.connect("clicked", lambda w: self.response(Gtk.ResponseType.OK))
-        self.ok_button.set_sensitive(False)
         header_bar.pack_end(self.ok_button)
 
         cancel_button = Gtk.Button(label=_("Cancel"))
         cancel_button.connect("clicked", lambda w: self.response(Gtk.ResponseType.CANCEL))
         header_bar.pack_start(cancel_button)
 
-        # --- Content ---
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         main_box.append(header_bar)
 
@@ -143,7 +140,6 @@ class PermissionsDialog(Adw.Window):
         self.set_default_size(350, -1)
         self._is_updating = False  # Flag to prevent signal loops
 
-        # --- HeaderBar ---
         header_bar = Adw.HeaderBar()
         header_bar.set_title_widget(Adw.WindowTitle(title=_("Change Permissions")))
 
@@ -155,7 +151,6 @@ class PermissionsDialog(Adw.Window):
         cancel_button.connect("clicked", lambda w: self.response(Gtk.ResponseType.CANCEL))
         header_bar.pack_start(cancel_button)
 
-        # --- Content ---
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         main_box.append(header_bar)
         self.set_content(main_box)
@@ -163,7 +158,6 @@ class PermissionsDialog(Adw.Window):
         content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=24, margin_bottom=24, margin_start=12, margin_end=12)
         main_box.append(content_box)
 
-        # --- Checkboxes ---
         grid = Gtk.Grid(column_spacing=12, row_spacing=6)
         grid.attach(Gtk.Label(label="", xalign=0), 0, 0, 1, 1) # Spacer
         grid.attach(Gtk.Label(label=_("Read"), halign=Gtk.Align.CENTER), 1, 0, 1, 1)
@@ -190,7 +184,6 @@ class PermissionsDialog(Adw.Window):
 
         content_box.append(grid)
 
-        # --- Octal Value ---
         octal_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, halign=Gtk.Align.CENTER)
         octal_box.append(Gtk.Label(label=_("Octal value:")))
         self.entry_octal = Gtk.Entry(max_length=4, width_chars=5)
@@ -270,7 +263,6 @@ class HostDialog(Adw.Window):
 
         self.set_default_size(550, -1)
 
-        # --- HeaderBar ---
         header_bar = Adw.HeaderBar()
         if self.is_edit_mode:
             header_bar.set_title_widget(Adw.WindowTitle(title=_("Edit Host: {host_name}").format(host_name=self.host_config.get('name', ''))))
@@ -290,8 +282,7 @@ class HostDialog(Adw.Window):
 
         page = Adw.PreferencesPage()
 
-        # --- Основные настройки ---
-        group_main = Adw.PreferencesGroup(title="Основные настройки")
+        group_main = Adw.PreferencesGroup()
         group_main.set_title(_("Basic Settings"))
         page.add(group_main)
 
@@ -299,12 +290,9 @@ class HostDialog(Adw.Window):
         self.protocol_row.connect("notify::selected-item", self.on_protocol_changed)
         group_main.add(self.protocol_row)
 
-
-        # Name
         self.entry_name = Adw.EntryRow(title=_("Name"))
         group_main.add(self.entry_name)
 
-        # Address (ActionRow + Gtk.Entry)
         row_host = Adw.ActionRow(title=_("Address"), subtitle=_("Format: [user@]hostname"))
         self.entry_host = Gtk.Entry()
         self.entry_host.set_valign(Gtk.Align.CENTER)
@@ -312,7 +300,6 @@ class HostDialog(Adw.Window):
         row_host.set_activatable_widget(self.entry_host)
         group_main.add(row_host)
 
-        # Group (Parent)
         row_group = Adw.ActionRow(title=_("Group"))
         self.combo_group = Gtk.ComboBoxText()
         row_group.add_suffix(self.combo_group)
@@ -321,7 +308,6 @@ class HostDialog(Adw.Window):
         self.group_iters = {}
         self.populate_groups_combo(parent_iter)
 
-        # --- Password ---
         self.group_auth = Adw.PreferencesGroup(
             title=_("Authentication"),
             description=_("Saved securely in system keyring") # Moved from subtitle
@@ -331,7 +317,6 @@ class HostDialog(Adw.Window):
         self.password_row = Adw.PasswordEntryRow(title=_("Password"))
         self.group_auth.add(self.password_row)
 
-        # Button to clear the saved password
         self.clear_password_button = Gtk.Button(icon_name="edit-clear-symbolic", valign=Gtk.Align.CENTER,
                                                 tooltip_text=_("Clear saved password"))
         self.clear_password_button.connect("clicked", self.on_clear_password)
@@ -342,7 +327,6 @@ class HostDialog(Adw.Window):
         self.group_port = Adw.PreferencesGroup()
         page.add(self.group_port)
 
-        # Port
         self.entry_port = Adw.SpinRow(
             title=_("Port"),
             subtitle=_("Leave 0 or empty for default"),
@@ -354,7 +338,6 @@ class HostDialog(Adw.Window):
         self.group_ssh_conn = Adw.PreferencesGroup(title=_("SSH Connection"))
         page.add(self.group_ssh_conn)
 
-        # Key (Using Adw.EntryRow + Button)
         self.row_key_file = Adw.EntryRow(title=_("Path to key (IdentityFile)"))
         key_button = Gtk.Button(icon_name="document-open-symbolic")
         key_button.set_valign(Gtk.Align.CENTER)
@@ -377,7 +360,6 @@ class HostDialog(Adw.Window):
                                              subtitle=_("Enables the -A flag (ForwardAgent)"))
         self.group_ssh_opts.add(self.switch_agent)
 
-        # Extra options (ActionRow + Gtk.Entry)
         row_options = Adw.ActionRow(title=_("Extra SSH Options"),
                                       subtitle=_("Example: -o ServerAliveInterval=60"))
         self.entry_options = Gtk.Entry()
@@ -409,9 +391,8 @@ class HostDialog(Adw.Window):
         self.entry_name.connect("notify::text", self.on_validate)
         self.entry_host.connect("changed", self.on_validate)
         self.entry_host.connect("changed", self.on_host_entry_changed)
-        self.on_validate(None) # Первая проверка
+        self.on_validate(None)
 
-        # --- Content ---
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         main_box.append(header_bar)
         main_box.append(page) # Adw.PreferencesPage is already scrollable
@@ -614,7 +595,6 @@ class GroupDialog(Adw.Window):
 
         self.tree_store = tree_store
 
-        # --- HeaderBar ---
         header_bar = Adw.HeaderBar()
         header_bar.set_title_widget(Adw.WindowTitle(title=_("Create New Group")))
 
@@ -628,7 +608,6 @@ class GroupDialog(Adw.Window):
         cancel_button.connect("clicked", lambda w: self.response(Gtk.ResponseType.CANCEL))
         header_bar.pack_start(cancel_button)
 
-        # --- Content ---
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         main_box.append(header_bar)
 
@@ -636,14 +615,12 @@ class GroupDialog(Adw.Window):
         main_box.append(content_box)
         self.set_content(main_box)
 
-        # Name (Gtk.Label + Gtk.Entry)
         content_box.append(Gtk.Label(label=_("Group Name:"), halign=Gtk.Align.START))
         self.entry_name = Gtk.Entry()
         self.entry_name.connect("changed", self.on_validate)
         self.entry_name.connect("activate", lambda e: self.response(Gtk.ResponseType.OK))
         content_box.append(self.entry_name)
 
-        # Group (Parent) (Gtk.Label + Gtk.ComboBoxText)
         content_box.append(Gtk.Label(label=_("Parent Group:"), halign=Gtk.Align.START))
         self.combo_group = Gtk.ComboBoxText()
         content_box.append(self.combo_group)
@@ -725,12 +702,10 @@ class SettingsDialog(Adw.Window):
         page_terminal.set_title(_("Terminal"))
         page_terminal.set_icon_name("utilities-terminal-symbolic")
 
-        # -- Group: Appearance --
         group_appearance = Adw.PreferencesGroup()
         group_appearance.set_title(_("Appearance"))
         page_terminal.add(group_appearance)
 
-        # Font
         font_row = Adw.ActionRow(title=_("Font"))
         self.font_button = Gtk.FontButton()
         self.font_button.set_font(self.settings_manager.get("terminal.font"))
@@ -741,7 +716,6 @@ class SettingsDialog(Adw.Window):
         font_row.set_activatable_widget(self.font_button)
         group_appearance.add(font_row)
 
-        # Color Scheme
         scheme_names = [v['name'] for v in COLOR_SCHEMES.values()]
         self.scheme_row = Adw.ComboRow(title=_("Color Scheme"), model=Gtk.StringList.new(scheme_names))
         
@@ -756,12 +730,10 @@ class SettingsDialog(Adw.Window):
 
         group_appearance.add(self.scheme_row)
 
-        # -- Group: Behavior --
         group_behavior = Adw.PreferencesGroup()
         group_behavior.set_title(_("Behavior"))
         page_terminal.add(group_behavior)
 
-        # Scrollback
         self.scrollback_row = Adw.SpinRow(
             title=_("Scrollback History"),
             subtitle=_("Number of lines to keep in history"),
@@ -803,7 +775,6 @@ class SettingsDialog(Adw.Window):
         group_commands = Adw.PreferencesGroup(title=_("Custom Commands"))
         page_commands.add(group_commands)
 
-        # Table-like structure
         commands_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         scrolled_view = Gtk.ScrolledWindow(vexpand=True)
         
@@ -814,13 +785,11 @@ class SettingsDialog(Adw.Window):
 
         self.commands_view = Gtk.TreeView(model=self.commands_store)
         
-        # Name column
         renderer_name = Gtk.CellRendererText(editable=True)
         renderer_name.connect("edited", self.on_command_edited, 0)
         col_name = Gtk.TreeViewColumn(_("Name"), renderer_name, text=0)
         self.commands_view.append_column(col_name)
 
-        # Command column
         renderer_cmd = Gtk.CellRendererText(editable=True)
         renderer_cmd.connect("edited", self.on_command_edited, 1)
         col_cmd = Gtk.TreeViewColumn(_("Command"), renderer_cmd, text=1)
@@ -829,7 +798,6 @@ class SettingsDialog(Adw.Window):
         scrolled_view.set_child(self.commands_view)
         commands_box.append(scrolled_view)
 
-        # Add/Remove buttons
         buttons_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, halign=Gtk.Align.START)
         add_button = Gtk.Button(icon_name="list-add-symbolic")
         add_button.connect("clicked", self.on_add_command)
@@ -918,7 +886,6 @@ class SettingsDialog(Adw.Window):
         reset_button.connect("clicked", self.on_reset)
         header_bar.pack_start(reset_button)
 
-        # --- Final layout ---
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         main_box.append(header_bar)
         main_box.append(split_view)
@@ -930,12 +897,10 @@ class SettingsDialog(Adw.Window):
         self.settings_manager.set("terminal.scrollback_lines", int(self.scrollback_row.get_value()))
         self.settings_manager.set("terminal.close_on_disconnect", self.close_on_disconnect_row.get_active())
         
-        # Terminal colors
         selected_idx = self.scheme_row.get_selected()
         scheme_key = list(COLOR_SCHEMES.keys())[selected_idx]
         self.settings_manager.set("terminal.color_scheme", scheme_key)
 
-        # Client paths
         self.settings_manager.set("client.ssh_path", self.ssh_path_row.get_text())
         self.settings_manager.set("client.telnet_path", self.telnet_path_row.get_text())
         self.settings_manager.set("client.sshpass_path", self.sshpass_path_row.get_text())
@@ -946,14 +911,12 @@ class SettingsDialog(Adw.Window):
             user_commands.append({"name": row[0], "command": row[1]})
         self.settings_manager.set("user_commands", user_commands)
 
-        # SFTP settings
         self.settings_manager.set("sftp.local_default_path", self.sftp_path_row.get_text())
         sort_col_map_rev = {0: "name", 1: "size", 2: "date"}
         self.settings_manager.set("sftp.local_default_sort_column", sort_col_map_rev.get(self.sftp_sort_col_row.get_selected(), "name"))
         sort_dir_map_rev = {0: "asc", 1: "desc"}
         self.settings_manager.set("sftp.local_default_sort_direction", sort_dir_map_rev.get(self.sftp_sort_dir_row.get_selected(), "asc"))
 
-        # Remote SFTP settings
         self.settings_manager.set("sftp.remote_default_sort_column", sort_col_map_rev.get(self.sftp_remote_sort_col_row.get_selected(), "name"))
         self.settings_manager.set("sftp.remote_default_sort_direction", sort_dir_map_rev.get(self.sftp_remote_sort_dir_row.get_selected(), "asc"))
 
@@ -983,7 +946,6 @@ class SettingsDialog(Adw.Window):
         current_page_name = self.stack.get_visible_child_name()
         
         if current_page_name == "terminal":
-            # Reset UI elements to default values
             self.scrollback_row.set_value(DEFAULT_SETTINGS["terminal.scrollback_lines"])
             self.close_on_disconnect_row.set_active(DEFAULT_SETTINGS["terminal.close_on_disconnect"])
             self.font_button.set_font(DEFAULT_SETTINGS["terminal.font"])
@@ -998,9 +960,7 @@ class SettingsDialog(Adw.Window):
             self.telnet_path_row.set_text(DEFAULT_SETTINGS["client.telnet_path"])
             self.sshpass_path_row.set_text(DEFAULT_SETTINGS["client.sshpass_path"])
         elif current_page_name == "commands":
-            # Clear the current list
             self.commands_store.clear()
-            # Repopulate from default settings
             default_commands = DEFAULT_SETTINGS.get("user_commands", [])
             for cmd in default_commands:
                 self.commands_store.append([cmd.get("name", ""), cmd.get("command", "")])
