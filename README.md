@@ -37,14 +37,9 @@ sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-
 ### For Fedora / RHEL Cuties:
 ```bash
 # The packages have slightly different names here, but it's the same vibe
-sudo dnf install python3-gobject gtk4 libadwaita vte-ng openssh-clients telnet
+sudo dnf install python3-gobject gtk4 libadwaita vte-ng openssh-clients telnet python3-paramiko
 ```
 
-### And for everyone, via pip:
-> Don't forget `pip`! It's for the spiciest part — SFTP.
-```bash
-pip install paramiko
-```
 
 ##  Packages & Updates
 
@@ -58,7 +53,7 @@ Updates and packages will happen **someday**. Maybe. If the vibe is right. For n
 Make sure you've installed everything, then run:
 
 ```bash
-git clone git@github.com:lknsfos/thongs-gtk4.dev.git
+git clone git clone https://github.com/lknsfos/thongs-gtk4.dev.git
 cd thongs-gtk4.dev
 # Install dependencies if you haven't already
 # pip install paramiko
