@@ -224,6 +224,11 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         self.notebook.set_hexpand(True)
         self.paned.set_end_child(self.notebook)
         
+        # ✨ Add mouse wheel scroll support for scrolling tabs.
+        # This will SWITCH tabs, as requested.
+        scroll_controller = Gtk.EventControllerScroll.new(flags=Gtk.EventControllerScrollFlags.VERTICAL)
+        scroll_controller.connect("scroll", self.on_notebook_scroll_switch)
+        self.notebook.add_controller(scroll_controller)
         # ✨ Add a small margin to prevent accidentally grabbing the paned handle
         self.connect("map", self.on_first_map)
 
@@ -449,7 +454,7 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         self.search_down_button.set_sensitive(has_results)
 
         if has_results:
-            self.search_nav_label.set_text(f"{self.current_search_index + 1} из {len(self.search_results)}")
+            self.search_nav_label.set_text(f"{self.current_search_index + 1} of {len(self.search_results)}")
         else:
             query = self.search_entry.get_text().strip()
             if query and not self.search_entry.get_style_context().has_class("error"):
@@ -1147,29 +1152,32 @@ class ThongSSHWindow(Adw.ApplicationWindow):
     # --- 6. Логика подключения (Терминал) (Пункт 6) ---
     # --- 6. Connection Logic (Terminal) ---
 
-    def start_session(self, config):
+    def start_session(self, config, existing_terminal_widget=None):
         """Starts a terminal session based on the host config (SSH or Telnet)."""
         host_str = config.get('host')
         if not host_str:
             logging.warning("Error: host is not set in the config.")
             return
 
-        if "@" not in host_str:
+        # Only ask for a username if it's an SSH connection and no user is specified.
+        if config.get("protocol", "ssh") == "ssh" and "@" not in host_str:
             dialog = InputDialog(
                 self,
                 title=_("Username Required"),
                 message=_("Enter username for {host_str}").format(host_str=host_str)
             )
-            # Run asynchronously
-            dialog.run_async(lambda username: self._continue_session(config, username))
+            # Run asynchronously to not block the UI
+            dialog.run_async(lambda username: self._continue_session(config, username, existing_terminal_widget))
         else:
-            self._continue_session(config, None)
+            self._continue_session(config, None, existing_terminal_widget)
 
-    def _continue_session(self, config, username_from_prompt):
+    def _continue_session(self, config, username_from_prompt, existing_terminal_widget=None):
         """Second part of the logic, called AFTER getting the username."""
 
-        # If "Cancel" was pressed in the dialog
-        if username_from_prompt is None and "@" not in config.get('host'):
+        protocol = config.get("protocol", "ssh")
+
+        # If "Cancel" was pressed in the dialog for an SSH connection that needs a username
+        if protocol == "ssh" and username_from_prompt is None and "@" not in config.get('host'):
             logging.info("Connection canceled (no username provided).")
             # Ensure we destroy the dialog if it's still around
             return
@@ -1258,8 +1266,13 @@ class ThongSSHWindow(Adw.ApplicationWindow):
 
         # --- 6.3. Terminal Launch ---
         try:
-            terminal = Vte.Terminal()
-
+            # If we are reconnecting, reuse the existing terminal. Otherwise, create a new one.
+            if existing_terminal_widget and existing_terminal_widget in self.open_sessions:
+                terminal, old_pid = self.open_sessions[existing_terminal_widget]
+                logging.debug(f"Reusing existing terminal widget. Old PID: {old_pid}")
+            else:
+                terminal = Vte.Terminal()
+            
             scrollback = self.settings_manager.get("terminal.scrollback_lines")
             font_str = self.settings_manager.get("terminal.font")
             scheme_key = self.settings_manager.get("terminal.color_scheme")
@@ -1284,24 +1297,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
                     palette=palette
                 )
 
-            terminal.set_vexpand(True)
-            terminal.set_hexpand(True)
-
-            right_click_gesture = Gtk.GestureClick.new()
-            right_click_gesture.set_button(Gdk.BUTTON_SECONDARY)
-            right_click_gesture.connect("pressed", self.on_terminal_right_click)
-            terminal.add_controller(right_click_gesture)
-
-            key_controller_terminal = Gtk.EventControllerKey.new()
-            key_controller_terminal.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-            key_controller_terminal.connect("key-pressed", self.on_terminal_key_pressed)
-            terminal.add_controller(key_controller_terminal)
-
-            scroll_controller = Gtk.EventControllerScroll.new(flags=Gtk.EventControllerScrollFlags.VERTICAL)
-            scroll_controller.connect("scroll", self.on_terminal_scroll)
-            terminal.add_controller(scroll_controller)
-
-
             success, pid = terminal.spawn_sync(
                 Vte.PtyFlags.DEFAULT,
                 os.environ['HOME'],
@@ -1320,25 +1315,43 @@ class ThongSSHWindow(Adw.ApplicationWindow):
                 dialog.present()
                 return
 
-            logging.debug(f"Процесс SSH запущен с PID: {pid}")
+            logging.debug(f"SSH process started with PID: {pid}")
 
-            scrolled_term = Gtk.ScrolledWindow()
-            scrolled_term.set_child(terminal)
+            # If this is a new session, create all the widgets.
+            if not existing_terminal_widget:
+                terminal.set_vexpand(True)
+                terminal.set_hexpand(True)
 
-            tab_label_box, close_btn = self._create_tab_label("utilities-terminal-symbolic", config['name'])
+                right_click_gesture = Gtk.GestureClick.new()
+                right_click_gesture.set_button(Gdk.BUTTON_SECONDARY)
+                right_click_gesture.connect("pressed", self.on_terminal_right_click)
+                terminal.add_controller(right_click_gesture)
 
-            page_num = self.notebook.append_page(scrolled_term, tab_label_box)
-            self.notebook.set_current_page(page_num)
+                key_controller_terminal = Gtk.EventControllerKey.new()
+                key_controller_terminal.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+                key_controller_terminal.connect("key-pressed", self.on_terminal_key_pressed)
+                terminal.add_controller(key_controller_terminal)
 
-            terminal.grab_focus()
+                scroll_controller = Gtk.EventControllerScroll.new(flags=Gtk.EventControllerScrollFlags.VERTICAL)
+                scroll_controller.connect("scroll", self.on_terminal_scroll)
+                terminal.add_controller(scroll_controller)
 
-            self.open_sessions[scrolled_term] = (terminal, pid)
-            # ✨ Store config for this tab
-            self.tab_data[scrolled_term] = {"type": "terminal", "config": config}
+                scrolled_term = Gtk.ScrolledWindow()
+                scrolled_term.set_child(terminal)
 
-            close_btn.connect("clicked", self.on_tab_close_button_clicked, scrolled_term, pid)
+                tab_label_box, close_btn = self._create_tab_label("utilities-terminal-symbolic", config['name'])
 
-            terminal.connect("child-exited", self.on_ssh_process_exited, scrolled_term)
+                page_num = self.notebook.append_page(scrolled_term, tab_label_box)
+                self.notebook.set_current_page(page_num)
+                terminal.grab_focus()
+
+                self.open_sessions[scrolled_term] = (terminal, pid)
+                self.tab_data[scrolled_term] = {"type": "terminal", "config": config}
+                close_btn.connect("clicked", self.on_tab_close_button_clicked, scrolled_term, pid)
+                terminal.connect("child-exited", self.on_ssh_process_exited, scrolled_term)
+            else: # This is a reconnect, just update the PID
+                self.open_sessions[existing_terminal_widget] = (terminal, pid)
+                terminal.grab_focus()
 
         except Exception as e:
             logging.critical(f"Critical error spawning VTE: {e}")
@@ -1508,32 +1521,74 @@ class ThongSSHWindow(Adw.ApplicationWindow):
                 self.force_close_tabs.remove(page_widget)
 
     def on_menu_tab_reconnect(self, action, param):
-        """Closes the current tab and opens a new one with the same config."""
+        """Reconnects the current tab without closing it."""
         current_page = self.notebook.get_current_page()
         if current_page < 0: return
         page_widget = self.notebook.get_nth_page(current_page)
 
         if page_widget in self.tab_data:
             tab_info = self.tab_data[page_widget]
-            self.on_menu_tab_disconnect(None, None) # Close current tab
-            # Re-open based on type
+
             if tab_info["type"] == "terminal":
-                self.start_session(tab_info["config"])
+                logging.debug(f"Reconnecting terminal tab in place for config: {tab_info['config']['name']}")
+                # Get the existing terminal widget
+                if page_widget in self.open_sessions:
+                    terminal, old_pid = self.open_sessions[page_widget]
+                    # Reset terminal state
+                    terminal.reset(True, True)
+                    terminal.set_input_enabled(True)
+                    # Re-run the full session start logic to handle username prompts correctly
+                    self.start_session(tab_info['config'], existing_terminal_widget=page_widget)
+                else: # Fallback to old behavior if something is wrong
+                    self.on_menu_tab_disconnect(None, None)
+                    self.start_session(tab_info["config"])
+
             elif tab_info["type"] == "sftp":
-                self.on_menu_open_sftp(None, None) # This re-reads selection, which is fine
+                # For SFTP, we can use its internal reconnect method
+                if hasattr(page_widget, 'reconnect'):
+                    page_widget.reconnect()
+                else: # Fallback
+                    self.on_menu_tab_disconnect(None, None)
+                    self.on_menu_open_sftp(None, None)
 
     def on_menu_tab_duplicate(self, action, param):
         """Opens a new tab with the same config as the current one."""
-        current_page = self.notebook.get_current_page()
-        if current_page < 0: return
-        page_widget = self.notebook.get_nth_page(current_page)
+        # This implementation was flawed. It should not re-read selection.
+        # It should use the config from the current tab.
+        current_page_widget = self.get_active_terminal_widget()
+        if current_page_widget and current_page_widget in self.tab_data:
+            tab_info = self.tab_data[current_page_widget]
+            
+            # Re-select the original host in the tree for clarity if cloning SFTP
+            if tab_info["type"] == "sftp":
+                # This is complex, for now, just open a new SFTP based on config
+                sftp_view = SftpWidget(tab_info["config"])
+                tab_label_box, close_btn = self._create_tab_label("folder-remote-symbolic", tab_info["config"]['name'])
+                page_num = self.notebook.append_page(sftp_view, tab_label_box)
+                self.notebook.set_current_page(page_num)
+                close_btn.connect("clicked", lambda btn: self.notebook.remove_page(self.notebook.page_num(sftp_view)))
+                self.tab_data[sftp_view] = {"type": "sftp", "config": tab_info["config"]}
+            else: # terminal
+                 self.start_session(tab_info["config"])
 
-        if page_widget in self.tab_data:
-            tab_info = self.tab_data[page_widget]
-            if tab_info["type"] == "terminal":
-                self.start_session(tab_info["config"])
-            elif tab_info["type"] == "sftp":
-                self.on_menu_open_sftp(None, None)
+    def on_notebook_scroll_switch(self, controller, dx, dy):
+        """Handles mouse wheel scrolling over the notebook to switch tabs."""
+        # dy < 0 is scroll up, dy > 0 is scroll down
+        n_pages = self.notebook.get_n_pages()
+        if n_pages < 2:
+            return False # Don't handle if there's nothing to switch to
+
+        current_page = self.notebook.get_current_page()
+
+        if dy < 0: # Scroll Up -> Previous Tab
+            new_page = (current_page - 1 + n_pages) % n_pages
+        elif dy > 0: # Scroll Down -> Next Tab
+            new_page = (current_page + 1) % n_pages
+        else:
+            return False # No vertical scroll
+
+        self.notebook.set_current_page(new_page)
+        return True # Event handled, stop propagation
 
     def on_menu_open_ssh_from_tab(self, action, param):
         """Opens a terminal session based on the current SFTP tab's config."""

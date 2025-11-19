@@ -102,7 +102,7 @@ def load_and_migrate_config():
 
         return migrated_data
     except json.JSONDecodeError:
-        logging.error(f"ОШИБКА: Конфиг {CONFIG_FILE} поврежден. Создаю резервную копию.")
+        logging.error(f"ERROR: Config {CONFIG_FILE} is corrupted. Creating a backup.")
         os.rename(CONFIG_FILE, f"{CONFIG_FILE}.bak")
         return load_and_migrate_config()
 

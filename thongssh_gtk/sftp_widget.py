@@ -48,6 +48,9 @@ class SftpWidget(Gtk.Box):
     """
     def __init__(self, host_config):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        # Add a flag to identify this widget as an SFTP tab, not a terminal.
+        self.is_sftp_widget = True
+
         self.host_config = host_config
         self.settings = SettingsManager()
 
@@ -65,7 +68,10 @@ class SftpWidget(Gtk.Box):
         self.ssh_client = None
         self.sftp_client = None
         self.current_remote_path = None
+        self.is_reconnecting = False # Flag to prevent multiple reconnect attempts
+        self.is_connected = False # Flag to track connection status
         self.ui_queue = queue.Queue() # For thread-safe UI updates
+        self.connection_check_timer_id = None # To store the ID of the connection check timer
 
         self.temp_dir = tempfile.mkdtemp(prefix="thongssh_sftp_")
         self.file_monitors = {} # {local_temp_path: (monitor, remote_path)}
@@ -118,7 +124,49 @@ class SftpWidget(Gtk.Box):
         self.setup_actions_and_popovers()
         self._connect_sftp()
         GLib.timeout_add(100, self._process_ui_queue)
+        self.connection_check_timer_id = GLib.timeout_add_seconds(15, self._check_connection_and_reconnect) # Check connection every 15 seconds
         self.connect("unrealize", self.on_widget_destroy)
+
+    def reconnect(self):
+        """Public method to trigger a reconnection."""
+        self._log_message(_("Reconnecting..."))
+
+        # Clear UI and state before attempting to reconnect.
+        self.ui_queue.put(lambda: self.remote_store.clear())
+        self.ui_queue.put(lambda: self.button_box.set_sensitive(False))
+        self.ui_queue.put(lambda: self.remote_path_entry.set_text(""))
+
+        # Close existing clients in a separate thread to avoid blocking the UI
+        self.is_connected = False
+        def close_clients():
+            if self.sftp_client: self.sftp_client.close()
+            if self.ssh_client: self.ssh_client.close()
+            self.sftp_client = None
+            self.ssh_client = None
+        threading.Thread(target=close_clients, daemon=True).start()
+
+        self._connect_sftp()
+
+    def _check_connection_and_reconnect(self):
+        """Periodically checks if the SFTP connection is active and reconnects if not."""
+        if self.is_reconnecting or not self.is_connected:
+            return True # Don't check if we are already trying to reconnect or not even connected yet.
+
+        if self.sftp_client:
+            try:
+                # A more reliable check is to perform a lightweight operation.
+                self.sftp_client.stat('.')
+                # If stat succeeds, the connection is alive. Do nothing.
+            except (OSError, paramiko.SSHException) as e:
+                # These exceptions are expected if the connection is dropped.
+                self._log_message(_("Connection lost. Attempting to reconnect..."), is_error=True)
+                self.is_reconnecting = True # Set the flag
+                self.reconnect()
+            except Exception as e:
+                # Log unexpected errors but don't necessarily trigger a reconnect
+                self._log_message(f"Unexpected error during connection check: {e}", is_error=True)
+
+        return True # Keep the timer running
 
     def _create_local_panel(self):
         """Builds the entire local file manager widget."""
@@ -211,6 +259,11 @@ class SftpWidget(Gtk.Box):
         right_click_gesture.connect("pressed", self.on_view_right_click, self.local_view)
         self.local_view.add_controller(right_click_gesture)
 
+        # Add a scroll controller to prevent scroll events from propagating to the notebook
+        scroll_controller = Gtk.EventControllerScroll.new(flags=Gtk.EventControllerScrollFlags.VERTICAL)
+        scroll_controller.connect("scroll", self._on_view_scroll, scrolled_window)
+        self.local_view.add_controller(scroll_controller)
+
         return frame
 
     def _create_remote_panel(self):
@@ -254,6 +307,11 @@ class SftpWidget(Gtk.Box):
         right_click_gesture.set_button(Gdk.BUTTON_SECONDARY)
         right_click_gesture.connect("pressed", self.on_view_right_click, self.remote_view)
         self.remote_view.add_controller(right_click_gesture)
+
+        # Add a scroll controller to prevent scroll events from propagating to the notebook
+        scroll_controller = Gtk.EventControllerScroll.new(flags=Gtk.EventControllerScrollFlags.VERTICAL)
+        scroll_controller.connect("scroll", self._on_view_scroll, scrolled_window)
+        self.remote_view.add_controller(scroll_controller)
 
         column_definitions = [
             (_("Name"), COL_NAME), (_("Size"), COL_SIZE_BYTES),
@@ -437,6 +495,8 @@ class SftpWidget(Gtk.Box):
                 initial_path = self.sftp_client.normalize('.')
                 self._load_remote_directory(initial_path)
                 self.ui_queue.put(lambda: self.button_box.set_sensitive(True))
+                self.is_connected = True
+                self.is_reconnecting = False
                 return
             except Exception as e:
                 self._log_message(_("Provided password authentication failed: {e}").format(e=e), is_error=True)
@@ -450,6 +510,8 @@ class SftpWidget(Gtk.Box):
                 self.ssh_client.connect(host, port=port, username=user, password=key_passphrase, key_filename=key_filename, timeout=10)
                 self.sftp_client = self.ssh_client.open_sftp()
                 self._log_message(_("SFTP connection established successfully with key."))
+                self.is_connected = True
+                self.is_reconnecting = False
             except paramiko.PasswordRequiredException:
                 self._log_message(_("SSH key is encrypted. Please enter the passphrase."))
                 def prompt_for_key_password():
@@ -480,6 +542,8 @@ class SftpWidget(Gtk.Box):
                     self.ssh_client.connect(host, port=port, username=user, password=password_from_keyring, key_filename=None, timeout=10, allow_agent=False, look_for_keys=False)
                     self.sftp_client = self.ssh_client.open_sftp()
                     self._log_message(_("SFTP connection established successfully with password."))
+                    self.is_connected = True
+                    self.is_reconnecting = False
                 except Exception as e:
                     self._log_message(_("Saved password authentication failed: {e}").format(e=e), is_error=True)
             else:
@@ -506,9 +570,12 @@ class SftpWidget(Gtk.Box):
             initial_path = self.sftp_client.normalize('.')
             self._load_remote_directory(initial_path)
             self.ui_queue.put(lambda: self.button_box.set_sensitive(True))
+            self.is_connected = True
+            self.is_reconnecting = False
         else:
             # If we reach here, it means all attempts failed.
             self._log_message(_("Authentication failed. Please check credentials and connection."), is_error=True)
+            self.is_reconnecting = False # Reset the flag on total failure
 
     def _make_progress_callback(self, filename, total_size):
         """Creates a callback function for paramiko to track file transfer progress."""
@@ -806,6 +873,11 @@ class SftpWidget(Gtk.Box):
 
     def on_widget_destroy(self, *args):
         """Clean up resources when the widget is destroyed."""
+        # Stop the periodic connection check timer
+        if self.connection_check_timer_id:
+            GLib.source_remove(self.connection_check_timer_id)
+            self.connection_check_timer_id = None
+
         if self.sftp_client: self.sftp_client.close()
         if self.ssh_client: self.ssh_client.close()
 
@@ -818,7 +890,7 @@ class SftpWidget(Gtk.Box):
         except Exception as e:
             self._log_message(f"Failed to clean up temporary directory {self.temp_dir}: {e}", is_error=True)
 
-        self._log_message(_("SFTP connection closed."))
+        self._log_message("SFTP connection closed.")
 
     def setup_actions_and_popovers(self):
         """Creates GActions and PopoverMenus for context menus."""
@@ -1044,3 +1116,24 @@ class SftpWidget(Gtk.Box):
         thread = threading.Thread(target=chmod_task)
         thread.daemon = True
         thread.start()
+
+    def _on_view_scroll(self, controller, dx, dy, scrolled_window):
+        """
+        Handles scroll events on the TreeViews to prevent them from propagating
+        to the parent notebook when the view is already at its limit.
+        """
+        adj = scrolled_window.get_vadjustment()
+        current_value = adj.get_value()
+        upper = adj.get_upper()
+        page_size = adj.get_page_size()
+
+        # dy > 0 means scrolling down, dy < 0 means scrolling up
+        if dy > 0 and current_value >= upper - page_size:
+            # We are at the bottom and scrolling down, stop the event.
+            return True
+        elif dy < 0 and current_value <= adj.get_lower():
+            # We are at the top and scrolling up, stop the event.
+            return True
+
+        # Otherwise, let the ScrolledWindow handle the event.
+        return False
