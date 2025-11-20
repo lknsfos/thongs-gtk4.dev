@@ -7,7 +7,7 @@ from .colors import COLOR_SCHEMES
 # Placeholder for future internationalization (i18n)
 _ = lambda s: s
 
-CONFIG_DIR = Path.home() / ".config" / "thongssh-dev"
+CONFIG_DIR = Path.home() / ".config" / "thongssh"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 
 DEFAULT_SETTINGS = {

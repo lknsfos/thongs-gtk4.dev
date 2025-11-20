@@ -1,4 +1,4 @@
-APP_ID = "com.example.thongssh.dev"
+APP_ID = "com.example.thongssh"
 
 # --- КОЛОНКИ TreeStore ---
 # (Имя, Тип, Иконка, Объект данных (config/node))

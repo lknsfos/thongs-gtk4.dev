@@ -62,7 +62,7 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         header_bar = Adw.HeaderBar()
         header_bar.set_show_end_title_buttons(True) # Shows min/max/close
 
-        title_widget = Adw.WindowTitle(title="ThongSSH", subtitle="0.3.11-dev")
+        title_widget = Adw.WindowTitle(title="ThongSSH", subtitle="0.3.11")
         header_bar.set_title_widget(title_widget)
 
         self.setup_global_menu(header_bar)
@@ -895,8 +895,8 @@ class ThongSSHWindow(Adw.ApplicationWindow):
     def on_menu_about(self, action, param):
         """Shows the 'About' window."""
         dialog = Adw.AboutWindow(transient_for=self)
-        dialog.set_application_name("ThongSSH") # No "dev" in application name
-        dialog.set_version("0.3.11-dev") # dev version
+        dialog.set_application_name("ThongSSH")
+        dialog.set_version("0.3.11")
         dialog.set_license_type(Gtk.License.MIT_X11)
         dialog.set_comments(_("SSH client with a tree-like host structure"))
         dialog.set_copyright("© 2025 Mikhael Karpov")
@@ -1368,12 +1368,12 @@ class ThongSSHWindow(Adw.ApplicationWindow):
     def _create_tab_label(self, icon_name, label_text):
         """Creates a standard tab label box with icon, text, close button, and context menu."""
         tab_label_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        icon = Gtk.Image.new_from_icon_name(icon_name)
+        icon = Gtk.Image.new_from_icon_name(icon_name) # No change here, this is correct
         tab_label = Gtk.Label(label=label_text)
         tab_label_box.append(icon)
         tab_label_box.append(tab_label)
 
-        close_btn = Gtk.Button(icon_name="window-close")
+        close_btn = Gtk.Button.new_from_icon_name("window-close-symbolic")
         close_btn.add_css_class("flat")
         tab_label_box.append(close_btn)
 
