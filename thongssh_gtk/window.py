@@ -258,7 +258,7 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             -gtk-icon-source: none;
         }
         """
-        css_provider.load_from_data(css_data.encode('utf-8'))
+        css_provider.load_from_string(css_data)
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(),
             css_provider,
