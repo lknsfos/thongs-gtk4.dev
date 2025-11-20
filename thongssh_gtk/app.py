@@ -36,9 +36,12 @@ class ThongSSHApp(Adw.Application):
         self.connect('activate', self.on_activate)
 
     def on_activate(self, app):
-        # Create the main window and show it
-        self.win = ThongSSHWindow(application=self)
-        self.win.present()
+        # If the window doesn't exist yet, create it.
+        if not self.props.active_window:
+            self.win = ThongSSHWindow(application=self)
+        # Present the window. This ensures it's shown correctly on subsequent activations.
+        self.props.active_window.present()
+
 
 def main():
     # ✨ Configure logging
