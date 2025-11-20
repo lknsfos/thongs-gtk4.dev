@@ -117,8 +117,8 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         scrolled_window.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.left_panel.append(scrolled_window)
 
-        # Tree model (4 columns)
-        self.main_tree_store = Gtk.TreeStore(GObject.TYPE_STRING, GObject.TYPE_STRING, GObject.TYPE_STRING, GObject.TYPE_PYOBJECT) # The main model
+        # Tree model (4 columns). Using Python types works when GObject is correctly imported.
+        self.main_tree_store = Gtk.TreeStore(str, str, str, object)
         self.view_tree_store = self.main_tree_store # The model for display (can be changed)
         self.is_filtered = False # Flag indicating if a filter is active
 
