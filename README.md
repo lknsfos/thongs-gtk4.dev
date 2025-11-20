@@ -30,16 +30,18 @@ To get this party started, you'll need a few things.
 
 ### For Ubuntu / Debian Babes:
 ```bash
-# Install system libraries for GTK4, terminal, secret storage (gnome-keyring), and the actual clients
 sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-vte-3.91 gnome-keyring gir1.2-secret-1 openssh-client telnet python3-paramiko
 ```
 
 ### For Fedora / RHEL Cuties:
 ```bash
-# The packages have slightly different names here, but it's the same vibe
-sudo dnf install python3-gobject gtk4 libadwaita vte-ng openssh-clients telnet python3-paramiko
+sudo dnf install python3-gobject gtk4 libadwaita vte4 gnome-keyring libsecret openssh-clients telnet python3-paramiko
 ```
 
+### For Arch Hotties:
+```bash
+sudo pacman -S python-gobject python-cairo gtk4 libadwaita vte4 gnome-keyring libsecret openssh inetutils python-paramiko
+```
 
 ##  Packages & Updates
 
@@ -53,10 +55,8 @@ Updates and packages will happen **someday**. Maybe. If the vibe is right. For n
 Make sure you've installed everything, then run:
 
 ```bash
-git clone git clone https://github.com/lknsfos/thongs-gtk4.dev.git
+git clone https://github.com/lknsfos/thongs-gtk4.dev.git
 cd thongs-gtk4.dev
-# Install dependencies if you haven't already
-# pip install paramiko
 python3 thongssh.py
 ```
 

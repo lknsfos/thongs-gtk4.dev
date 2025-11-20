@@ -223,13 +223,14 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         self.notebook.set_vexpand(True)
         self.notebook.set_hexpand(True)
         self.paned.set_end_child(self.notebook)
+        # ✨ Add a small margin to prevent accidentally grabbing the paned handle
+        self.notebook.set_margin_start(6)
         
         # ✨ Add mouse wheel scroll support for scrolling tabs.
         # This will SWITCH tabs, as requested.
         scroll_controller = Gtk.EventControllerScroll.new(flags=Gtk.EventControllerScrollFlags.VERTICAL)
         scroll_controller.connect("scroll", self.on_notebook_scroll_switch)
         self.notebook.add_controller(scroll_controller)
-        # ✨ Add a small margin to prevent accidentally grabbing the paned handle
         self.connect("map", self.on_first_map)
 
 
@@ -656,7 +657,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         self.add_action(action_tab_duplicate)
 
 
-
         # 2. Create GMenu (models)
         # Menu for a HOST
         host_menu = Gio.Menu()
@@ -897,7 +897,7 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         dialog = Adw.AboutWindow(transient_for=self)
         dialog.set_application_name("ThongSSH") # No "dev" in application name
         dialog.set_version("0.3.11-dev") # dev version
-        dialog.set_license_type(Gtk.License.GPL_3_0)
+        dialog.set_license_type(Gtk.License.MIT_X11)
         dialog.set_comments(_("SSH client with a tree-like host structure"))
         dialog.set_copyright("© 2025 Mikhael Karpov")
         dialog.set_developers(["Gemini Code Assist"])
@@ -1337,6 +1337,8 @@ class ThongSSHWindow(Adw.ApplicationWindow):
                 terminal.add_controller(scroll_controller)
 
                 scrolled_term = Gtk.ScrolledWindow()
+                # ✨ This ensures the terminal gets the correct size allocation
+                scrolled_term.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
                 scrolled_term.set_child(terminal)
 
                 tab_label_box, close_btn = self._create_tab_label("utilities-terminal-symbolic", config['name'])
@@ -1480,6 +1482,10 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             terminal.set_input_enabled(False)
 
     def close_tab(self, widget):
+        """
+        Closes a tab, removes it from the notebook, and cleans up associated resources
+        like session data and timers.
+        """
         """Uses .remove_page()"""
         if widget in self.open_sessions:
             page_num = self.notebook.page_num(widget)
@@ -1500,6 +1506,15 @@ class ThongSSHWindow(Adw.ApplicationWindow):
 
             del self.open_sessions[widget]
         else:
+            # It might be an SFTP tab or another non-session widget
+            page_num = self.notebook.page_num(widget)
+            if page_num != -1:
+                self.notebook.remove_page(page_num)
+            if widget in self.tab_data:
+                del self.tab_data[widget]
+            if widget in self.force_close_tabs:
+                self.force_close_tabs.remove(widget)
+
             logging.warning(f"Attempted to close a tab that is not in open_sessions.")
 
     # --- Tab Context Menu Handlers ---
@@ -1514,11 +1529,7 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             terminal, pid = self.open_sessions[page_widget]
             self.on_tab_close_button_clicked(None, page_widget, pid)
         else:
-            self.notebook.remove_page(current_page)
-            if page_widget in self.tab_data:
-                del self.tab_data[page_widget]
-            if page_widget in self.force_close_tabs:
-                self.force_close_tabs.remove(page_widget)
+            self.close_tab(page_widget)
 
     def on_menu_tab_reconnect(self, action, param):
         """Reconnects the current tab without closing it."""
@@ -1531,6 +1542,10 @@ class ThongSSHWindow(Adw.ApplicationWindow):
 
             if tab_info["type"] == "terminal":
                 logging.debug(f"Reconnecting terminal tab in place for config: {tab_info['config']['name']}")
+                # If the terminal was in a "finished" state, enable input again
+                terminal = self.get_active_terminal()
+                if terminal:
+                    terminal.set_input_enabled(True)
                 # Get the existing terminal widget
                 if page_widget in self.open_sessions:
                     terminal, old_pid = self.open_sessions[page_widget]
@@ -1540,6 +1555,8 @@ class ThongSSHWindow(Adw.ApplicationWindow):
                     # Re-run the full session start logic to handle username prompts correctly
                     self.start_session(tab_info['config'], existing_terminal_widget=page_widget)
                 else: # Fallback to old behavior if something is wrong
+                    # This part is tricky. Reconnecting should not require killing the process.
+                    # Let's reset the terminal and re-run the command.
                     self.on_menu_tab_disconnect(None, None)
                     self.start_session(tab_info["config"])
 
