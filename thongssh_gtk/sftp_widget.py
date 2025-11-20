@@ -195,7 +195,7 @@ class SftpWidget(Gtk.Box):
         scrolled_window.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         main_vbox.append(scrolled_window)
 
-        self.local_store = Gtk.ListStore(str, str, str, int, str, int, str, int, bool, str)
+        self.local_store = Gtk.ListStore(str, str, str, GObject.TYPE_INT64, str, int, str, GObject.TYPE_INT64, bool, str)
         self.local_sortable_model = Gtk.TreeModelSort(model=self.local_store)
         self.local_view = Gtk.TreeView(model=self.local_sortable_model)
         self.local_view.connect("row-activated", self.on_local_row_activated)
@@ -293,7 +293,7 @@ class SftpWidget(Gtk.Box):
         scrolled_window.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         main_vbox.append(scrolled_window)
 
-        self.remote_store = Gtk.ListStore(str, str, str, int, str, int, str, int, bool, str)
+        self.remote_store = Gtk.ListStore(str, str, str, GObject.TYPE_INT64, str, int, str, GObject.TYPE_INT64, bool, str)
         self.remote_sortable_model = Gtk.TreeModelSort(model=self.remote_store)
         self.remote_view = Gtk.TreeView(model=self.remote_sortable_model)
         self.remote_view.connect("row-activated", self.on_remote_row_activated)
