@@ -118,7 +118,7 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         self.left_panel.append(scrolled_window)
 
         # Tree model (4 columns)
-        self.main_tree_store = Gtk.TreeStore(str, str, str, object) # The main model
+        self.main_tree_store = Gtk.TreeStore(GObject.TYPE_STRING, GObject.TYPE_STRING, GObject.TYPE_STRING, GObject.TYPE_PYOBJECT) # The main model
         self.view_tree_store = self.main_tree_store # The model for display (can be changed)
         self.is_filtered = False # Flag indicating if a filter is active
 
