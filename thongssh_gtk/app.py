@@ -20,8 +20,8 @@ except ValueError as e:
     sys.exit(1)
 
 from gi.repository import Adw, Gio, Gtk, GdkPixbuf
-from .window import ThongSSHWindow
-from .constants import APP_ID
+from .window import ThongSSHWindow # Keep relative import
+from .constants import APP_ID, resource_path # Import our new function
 
 # --- Application Class ---
 class ThongSSHApp(Adw.Application):
@@ -29,8 +29,8 @@ class ThongSSHApp(Adw.Application):
         super().__init__(application_id=APP_ID, **kwargs)
         # ✨ Register resources in the constructor, BEFORE creating the window
         try:
-            resource_path = os.path.join(os.path.dirname(__file__), "thongssh.gresource")
-            Gio.resources_register(Gio.Resource.load(resource_path))
+            res_path = resource_path("thongssh.gresource") # Use the helper function
+            Gio.resources_register(Gio.Resource.load(res_path))
         except gi.repository.GLib.GError:
             logging.debug("Resources already registered, skipping.")
         self.connect('activate', self.on_activate)

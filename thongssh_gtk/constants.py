@@ -1,4 +1,19 @@
+import sys
+import os
+
 APP_ID = "com.example.thongssh"
+
+def resource_path(relative_path):
+    """
+    Get absolute path to resource, works for dev and for PyInstaller.
+    """
+    # PyInstaller creates a temp folder and stores path in _MEIPASS
+    if hasattr(sys, '_MEIPASS'):
+        # When bundled, the 'thongssh_gtk' folder is at the root.
+        return os.path.join(sys._MEIPASS, 'thongssh_gtk', relative_path)
+
+    # In development, the path is relative to the thongssh_gtk directory
+    return os.path.join(os.path.dirname(__file__), relative_path)
 
 # --- КОЛОНКИ TreeStore ---
 # (Имя, Тип, Иконка, Объект данных (config/node))
