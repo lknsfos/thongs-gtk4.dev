@@ -4,8 +4,6 @@ import sys
 import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk
-import os
-import sys
 import glob
 
 def _find_typelib_dir(base):
@@ -38,6 +36,7 @@ def _set_typelib_path():
         print("DEBUG: No gi/typelib directory with .typelib files found inside sys._MEIPASS", file=sys.stderr)
         return
     typedir = os.path.normpath(typedir)
+    # collapse accidental double _internal segments
     typedir = typedir.replace(os.path.join('_internal', '_internal'), os.path.join('_internal'))
     os.environ['GI_TYPELIB_PATH'] = typedir
     print(f"DEBUG: GI_TYPELIB_PATH explicitly set to: {typedir}", file=sys.stderr)
