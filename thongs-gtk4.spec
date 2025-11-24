@@ -6,9 +6,11 @@ block_cipher = None
 script_file = 'run.py'
 
 # Все ваши ресурсы (иконки, ui, шаблоны)
-datas = collect_data_files('thongssh_gtk', subdir='resources')
-datas += collect_data_files('thongssh_gtk', subdir='icons')
-datas += collect_data_files('thongssh_gtk', subdir='ui')
+datas = []
+datas.extend(collect_data_files('thongssh_gtk', subdir='resources'))
+datas.extend(collect_data_files('thongssh_gtk', subdir='ui'))
+# ✨ ПРАВИЛЬНОЕ МЕСТО для добавления gresource файла
+datas.append(('thongssh_gtk/thongssh.gresource', '.'))
 
 # Собираем GI typelib вручную
 typelibs = [
@@ -36,8 +38,6 @@ a = Analysis(
     noarchive=False,
     cipher=block_cipher
 )
-
-a.datas += [('thongssh_gtk/thongssh.gresource', '.')]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
