@@ -40,13 +40,10 @@ a = Analysis(
     hiddenimports=[],
     hookspath=['./hooks'],
     runtime_hooks=['rth_gi_force_reload.py', 'rth_gi_typelibs.py'],
-    # обязательно исключаем Python-части gi/gobject из бандла
+    # исключаем любые Python-модули gi/gobject из бандла
     excludes=[
-        'gi',                 # пакет gi (shim) — пусть используется system-installed
-        'gi.overrides',       # любые overrides не пакуем
-        'gi.repository',      # модуль с репозиториями
-        'gobject',            # старые статические пакеты/модули
-        'gobject.*',
+        'gi', 'gi.*',
+        'gobject', 'gobject.*',
     ],
     noarchive=False,
     cipher=block_cipher
