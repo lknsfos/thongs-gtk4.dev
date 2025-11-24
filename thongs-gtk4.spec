@@ -2,6 +2,7 @@
 import os
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 import glob
+import sys
 
 block_cipher = None
 script_file = 'run.py'
@@ -26,7 +27,7 @@ a = Analysis(
     datas=datas,
     hiddenimports=[],
     hookspath=['./hooks'], # Указываем путь к нашим локальным хукам
-    runtime_hooks=[], # Убираем runtime хуки, они не работают.
+    runtime_hooks=['rth_gi_typelibs.py'], # ensure GI_TYPELIB_PATH is set early
     excludes=[],
     noarchive=False,
     cipher=block_cipher
@@ -55,3 +56,8 @@ coll = COLLECT(
     upx=True,
     name='thongs-gtk4'
 )
+
+if hasattr(sys, '_MEIPASS'):
+    typelib_dir = os.path.join(sys._MEIPASS, 'gi', 'typelib')
+    os.environ['GI_TYPELIB_PATH'] = typelib_dir
+    print(f"DEBUG: GI_TYPELIB_PATH set to: {typelib_dir}", file=sys.stderr)
