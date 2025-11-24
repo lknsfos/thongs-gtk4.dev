@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 import glob
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 import sys
 
 block_cipher = None
@@ -14,22 +14,21 @@ datas.extend(collect_data_files('thongssh_gtk', subdir='ui'))
 # ✨ ПРАВИЛЬНОЕ МЕСТО для добавления gresource файла
 datas.append(('thongssh_gtk/thongssh.gresource', '.'))
 
-# --- САМЫЙ НАДЁЖНЫЙ СПОСОБ: ЯВНОЕ КОПИРОВАНИЕ СИСТЕМНЫХ TYPELIB ---
-# Находим все .typelib файлы в системном каталоге и копируем их в папку gi/typelib внутри сборки.
-typelib_src_dirs = [
+# Собираем system .typelib в целевую папку gi/typelib внутри dist
+_typelib_dirs = [
     '/usr/lib/girepository-1.0',
     '/usr/lib64/girepository-1.0',
     '/usr/local/lib/girepository-1.0',
 ]
-typelib_datas = []
-for d in typelib_src_dirs:
-    if os.path.isdir(d):
-        for f in glob.glob(os.path.join(d, '*.typelib')):
-            # положить в _internal/gi/typelib внутри dist
-            typelib_datas.append((f, os.path.join('_internal', 'gi', 'typelib')))
+_typelib_datas = []
+for _d in _typelib_dirs:
+    if os.path.isdir(_d):
+        for _f in glob.glob(os.path.join(_d, '*.typelib')):
+            # целевая папка внутри dist: gi/typelib
+            _typelib_datas.append((_f, os.path.join('gi', 'typelib')))
 
-# append to existing datas variable used by Analysis
-datas = datas + typelib_datas
+# Если в файле уже есть datas, объединим; если нет — создадим
+datas = (globals().get('datas') or []) + _typelib_datas
 
 a = Analysis(
     [script_file],
@@ -38,7 +37,7 @@ a = Analysis(
     datas=datas,
     hiddenimports=[],
     hookspath=['./hooks'],
-    runtime_hooks=['rth_gi_typelibs.py'],
+    runtime_hooks=['rth_gi_typelibs.py'],  # подключаем наш runtime-hook
     excludes=[],
     noarchive=False,
     cipher=block_cipher
