@@ -37,6 +37,8 @@ a = Analysis(
     cipher=block_cipher
 )
 
+a.datas += [('thongssh_gtk/thongssh.gresource', '.')]
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(

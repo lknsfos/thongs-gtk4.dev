@@ -19,7 +19,7 @@ except ValueError as e:
     logging.shutdown() # Ensure logs are flushed before exit
     sys.exit(1)
 
-from gi.repository import Adw, Gio, Gtk, GdkPixbuf, GLib
+from gi.repository import Adw, Gio, Gtk, GdkPixbuf, GLib # GLib здесь для доступа к константам, а не к GError
 from .window import ThongSSHWindow # Keep relative import
 from .constants import APP_ID, resource_path # Import our new function
 
@@ -31,8 +31,11 @@ class ThongSSHApp(Adw.Application):
         try:
             res_path = resource_path("thongssh.gresource", in_module=False) # Use the helper function
             Gio.resources_register(Gio.Resource.load(res_path))
-        except GLib.Error as e:
-            logging.warning(f"Could not register resources: {e}")
+            logging.debug(f"Successfully registered resources from: {res_path}")
+        except GLib.GError as e:
+            # Это правильный способ перехвата GError.
+            logging.error(f"FATAL: Could not load gresource file at '{res_path}'. {e}")
+            logging.error("This usually means the .gresource file was not included in the PyInstaller bundle. Check your .spec file.")
         self.connect('activate', self.on_activate)
 
     def on_activate(self, app):
