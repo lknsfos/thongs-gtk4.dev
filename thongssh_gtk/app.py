@@ -19,7 +19,7 @@ except ValueError as e:
     logging.shutdown() # Ensure logs are flushed before exit
     sys.exit(1)
 
-from gi.repository import Adw, Gio, Gtk, GdkPixbuf
+from gi.repository import Adw, Gio, Gtk, GdkPixbuf, GLib
 from .window import ThongSSHWindow # Keep relative import
 from .constants import APP_ID, resource_path # Import our new function
 
@@ -31,8 +31,8 @@ class ThongSSHApp(Adw.Application):
         try:
             res_path = resource_path("thongssh.gresource") # Use the helper function
             Gio.resources_register(Gio.Resource.load(res_path))
-        except gi.repository.GLib.GError:
-            logging.debug("Resources already registered, skipping.")
+        except GLib.Error as e:
+            logging.warning(f"Could not register resources: {e}")
         self.connect('activate', self.on_activate)
 
     def on_activate(self, app):
