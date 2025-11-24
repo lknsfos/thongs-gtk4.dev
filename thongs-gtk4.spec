@@ -13,22 +13,20 @@ datas.extend(collect_data_files('thongssh_gtk', subdir='ui'))
 # ✨ ПРАВИЛЬНОЕ МЕСТО для добавления gresource файла
 datas.append(('thongssh_gtk/thongssh.gresource', '.'))
 
-# --- НАДЁЖНЫЙ СПОСОБ: Явное копирование системных typelib ---
+# --- САМЫЙ ТУПОЙ, НО НАДЁЖНЫЙ СПОСОБ ---
+# Копируем все системные typelib в корень бандла.
 typelib_path = '/usr/lib/x86_64-linux-gnu/girepository-1.0'
 if os.path.isdir(typelib_path):
-    datas.extend([(f, 'gi/typelib') for f in glob.glob(os.path.join(typelib_path, '*.typelib'))])
-else:
-    # Если основной путь не найден, используем хук как запасной вариант
-    datas.extend(collect_data_files('gi', subdir='typelib'))
+    datas.extend([(f, '.') for f in glob.glob(os.path.join(typelib_path, '*.typelib'))])
 
 a = Analysis(
     [script_file],
     pathex=[os.path.abspath('.')],
-    binaries=collect_dynamic_libs('gi'), # ✨ Автоматический сбор библиотек gi
+    binaries=[],
     datas=datas,
     hiddenimports=[],
     hookspath=[],
-    runtime_hooks=['rth_gi_typelibs.py'],
+    runtime_hooks=[], # Убираем хуки, они не работают.
     excludes=[],
     noarchive=False,
     cipher=block_cipher
