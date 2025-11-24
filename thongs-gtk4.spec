@@ -39,8 +39,8 @@ a = Analysis(
     datas=datas,
     hiddenimports=[],
     hookspath=['./hooks'],
-    runtime_hooks=['rth_gi_force_reload.py', 'rth_gi_typelibs.py'],
-    # исключаем любые Python-модули gi/gobject из бандла
+    # сначала установить GI_TYPELIB_PATH, потом пробовать реимпортировать gi
+    runtime_hooks=['rth_gi_typelibs.py', 'rth_gi_force_reload.py'],
     excludes=[
         'gi', 'gi.*',
         'gobject', 'gobject.*',
