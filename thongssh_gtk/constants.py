@@ -3,14 +3,17 @@ import os
 
 APP_ID = "com.example.thongssh"
 
-def resource_path(relative_path):
+def resource_path(relative_path, in_module=True):
     """
     Get absolute path to resource, works for dev and for PyInstaller.
+    - in_module=True: path is relative to the thongssh_gtk module folder.
+    - in_module=False: path is relative to the bundle's root (_MEIPASS).
     """
     # PyInstaller creates a temp folder and stores path in _MEIPASS
     if hasattr(sys, '_MEIPASS'):
-        # When bundled, the 'thongssh_gtk' folder is at the root.
-        return os.path.join(sys._MEIPASS, 'thongssh_gtk', relative_path)
+        if in_module:
+            return os.path.join(sys._MEIPASS, 'thongssh_gtk', relative_path)
+        return os.path.join(sys._MEIPASS, relative_path)
 
     # In development, the path is relative to the thongssh_gtk directory
     return os.path.join(os.path.dirname(__file__), relative_path)

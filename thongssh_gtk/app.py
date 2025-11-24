@@ -29,9 +29,9 @@ class ThongSSHApp(Adw.Application):
         super().__init__(application_id=APP_ID, **kwargs)
         # ✨ Register resources in the constructor, BEFORE creating the window
         try:
-            res_path = resource_path("thongssh.gresource") # Use the helper function
+            res_path = resource_path("thongssh.gresource", in_module=False) # Use the helper function
             Gio.resources_register(Gio.Resource.load(res_path))
-        except GLib.Error as e:
+        except gi.repository.GLib.GError as e:
             logging.warning(f"Could not register resources: {e}")
         self.connect('activate', self.on_activate)
 
