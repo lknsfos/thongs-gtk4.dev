@@ -16,9 +16,20 @@ datas.append(('thongssh_gtk/thongssh.gresource', '.'))
 
 # --- САМЫЙ НАДЁЖНЫЙ СПОСОБ: ЯВНОЕ КОПИРОВАНИЕ СИСТЕМНЫХ TYPELIB ---
 # Находим все .typelib файлы в системном каталоге и копируем их в папку gi/typelib внутри сборки.
-typelib_path = '/usr/lib/x86_64-linux-gnu/girepository-1.0'
-if os.path.isdir(typelib_path):
-    datas.extend([(f, 'gi/typelib') for f in glob.glob(os.path.join(typelib_path, '*.typelib'))])
+typelib_src_dirs = [
+    '/usr/lib/girepository-1.0',
+    '/usr/lib64/girepository-1.0',
+    '/usr/local/lib/girepository-1.0',
+]
+typelib_datas = []
+for d in typelib_src_dirs:
+    if os.path.isdir(d):
+        for f in glob.glob(os.path.join(d, '*.typelib')):
+            # положить в _internal/gi/typelib внутри dist
+            typelib_datas.append((f, os.path.join('_internal', 'gi', 'typelib')))
+
+# append to existing datas variable used by Analysis
+datas = datas + typelib_datas
 
 a = Analysis(
     [script_file],
@@ -26,8 +37,8 @@ a = Analysis(
     binaries=[],
     datas=datas,
     hiddenimports=[],
-    hookspath=['./hooks'], # Указываем путь к нашим локальным хукам
-    runtime_hooks=['rth_gi_typelibs.py'], # ensure GI_TYPELIB_PATH is set early
+    hookspath=['./hooks'],
+    runtime_hooks=['rth_gi_typelibs.py'],
     excludes=[],
     noarchive=False,
     cipher=block_cipher
