@@ -14,20 +14,27 @@ datas.extend(collect_data_files('thongssh_gtk', subdir='ui'))
 # ✨ ПРАВИЛЬНОЕ МЕСТО для добавления gresource файла
 datas.append(('thongssh_gtk/thongssh.gresource', '.'))
 
-# Собираем system .typelib в целевую папку gi/typelib внутри dist
+# Собираем system .typelib и добавляем в datas -> целевая папка 'gi/typelib' внутри dist
 _typelib_dirs = [
     '/usr/lib/girepository-1.0',
     '/usr/lib64/girepository-1.0',
     '/usr/local/lib/girepository-1.0',
+    '/usr/lib/x86_64-linux-gnu/girepository-1.0',
 ]
 _typelib_datas = []
+_found = False
 for _d in _typelib_dirs:
     if os.path.isdir(_d):
         for _f in glob.glob(os.path.join(_d, '*.typelib')):
-            # целевая папка внутри dist: gi/typelib
-            _typelib_datas.append((_f, os.path.join('gi', 'typelib')))
+            _typelib_datas.append((_f, os.path.join('_internal', 'gi', 'typelib')))
+            _found = True
 
-# Если в файле уже есть datas, объединим; если нет — создадим
+# debug: если не найдено, попытаться добавить всё из /usr/lib (без ломки сборки)
+if not _found:
+    for _f in glob.glob('/usr/lib/**/*.typelib', recursive=True):
+        _typelib_datas.append((_f, os.path.join('_internal', 'gi', 'typelib')))
+
+# объединяем с существующими datas (если есть)
 datas = (globals().get('datas') or []) + _typelib_datas
 
 a = Analysis(
@@ -37,7 +44,7 @@ a = Analysis(
     datas=datas,
     hiddenimports=[],
     hookspath=['./hooks'],
-    runtime_hooks=['rth_gi_typelibs.py'],  # подключаем наш runtime-hook
+    runtime_hooks=['rth_gi_typelibs.py'],
     excludes=[],
     noarchive=False,
     cipher=block_cipher
