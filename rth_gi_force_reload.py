@@ -40,23 +40,30 @@ def _set_and_reload():
     except Exception:
         pass
 
-    # Если gi уже импортирован — удалить и повторно импортировать после установки пути
-    to_del = [k for k in list(sys.modules.keys()) if k == 'gi' or k.startswith('gi.')]
+    # remove any preloaded gi.* and any gobject* entries BEFORE re-import
+    to_del = [k for k in list(sys.modules.keys()) if k == 'gi' or k.startswith('gi.') or k == 'gobject' or k.startswith('gobject.')]
     if to_del:
-        print(f"DEBUG: removing preloaded gi modules: {to_del}", file=sys.stderr)
+        print(f"DEBUG: removing preloaded modules: {to_del}", file=sys.stderr)
     for k in to_del:
         sys.modules.pop(k, None)
 
-    try:
-        import gi
-        # явные require_version перед импортом репозиториев
+    # ensure no stray file named 'gobject' on sys.path shadows gi (diagnostics)
+    for p in sys.path:
         try:
-            gi.require_version("GLib", "2.0")
+            for cand in ('gobject.py', 'gobject', 'gobject.so', 'gobject.pyd'):
+                fp = os.path.join(p, cand)
+                if os.path.exists(fp):
+                    print(f"DEBUG: found possible shadowing file: {fp}", file=sys.stderr)
         except Exception:
             pass
-        # импорт основных модулей чтобы инициализировать обвязки
+
+    # now import gi and core repositories
+    try:
+        import gi
+        gi.require_version("GLib", "2.0")
         import gi.repository.GObject  # noqa: F401
         import gi.repository.GLib     # noqa: F401
+        gi.require_version("Gtk", "4.0")
         import gi.repository.Gtk      # noqa: F401
         print("DEBUG: gi re-imported after GI_TYPELIB_PATH set", file=sys.stderr)
     except Exception as e:
