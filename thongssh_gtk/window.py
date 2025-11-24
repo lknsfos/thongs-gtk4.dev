@@ -116,9 +116,7 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         scrolled_window.set_vexpand(True)
         scrolled_window.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.left_panel.append(scrolled_window)
-
-        self.main_tree_store = Gtk.TreeStore(str, str, str, object) # Этот код ВЕРНЫЙ. Проблема была в порядке импорта.
-        self.main_tree_store = Gtk.TreeStore(GObject.TYPE_STRING, GObject.TYPE_STRING, GObject.TYPE_STRING, GObject.TYPE_PYOBJECT)
+        self.main_tree_store = Gtk.TreeStore(str, str, str, object) # Этот код ВЕРНЫЙ.
         self.view_tree_store = self.main_tree_store # The model for display (can be changed)
         self.is_filtered = False # Flag indicating if a filter is active
 
