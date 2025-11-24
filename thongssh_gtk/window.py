@@ -13,7 +13,7 @@ import logging
 import datetime
 import re
 
-from gi.repository import Gtk, Adw, Gdk, GLib, Vte, Pango, Gio, GObject
+from gi.repository import GObject, Gtk, Adw, Gdk, GLib, Vte, Pango, Gio
 
 from .constants import APP_ID, COL_NAME, COL_TYPE, COL_ICON, COL_DATA
 from .dialogs import InputDialog, HostDialog, GroupDialog # Removed SettingsDialog
@@ -117,8 +117,8 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         scrolled_window.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.left_panel.append(scrolled_window)
 
-        # Tree model (4 columns). Using Python types works when GObject is correctly imported.
-        self.main_tree_store = Gtk.TreeStore(str, str, str, object)
+        self.main_tree_store = Gtk.TreeStore(str, str, str, object) # Этот код ВЕРНЫЙ. Проблема была в порядке импорта.
+        self.main_tree_store = Gtk.TreeStore(GObject.TYPE_STRING, GObject.TYPE_STRING, GObject.TYPE_STRING, GObject.TYPE_PYOBJECT)
         self.view_tree_store = self.main_tree_store # The model for display (can be changed)
         self.is_filtered = False # Flag indicating if a filter is active
 
