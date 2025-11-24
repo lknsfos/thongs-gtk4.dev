@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 block_cipher = None
 script_file = 'run.py'
@@ -12,24 +12,13 @@ datas.extend(collect_data_files('thongssh_gtk', subdir='ui'))
 # ✨ ПРАВИЛЬНОЕ МЕСТО для добавления gresource файла
 datas.append(('thongssh_gtk/thongssh.gresource', '.'))
 
-# Собираем GI typelib вручную
-typelibs = [
-    '/usr/lib/x86_64-linux-gnu/girepository-1.0/Gtk-4.0.typelib',
-    '/usr/lib/x86_64-linux-gnu/girepository-1.0/Gdk-4.0.typelib',
-    '/usr/lib/x86_64-linux-gnu/girepository-1.0/GdkPixbuf-2.0.typelib',
-    '/usr/lib/x86_64-linux-gnu/girepository-1.0/GLib-2.0.typelib',
-    '/usr/lib/x86_64-linux-gnu/girepository-1.0/GObject-2.0.typelib',
-    '/usr/lib/x86_64-linux-gnu/girepository-1.0/Pango-1.0.typelib',
-    '/usr/lib/x86_64-linux-gnu/girepository-1.0/Adw-1.typelib',
-]
-
-for t in typelibs:
-    datas.append((t, os.path.join('usr', 'lib', 'girepository-1.0')))
+# ✨ Автоматический сбор всех typelib файлов
+datas.extend(collect_data_files('gi', subdir='typelib'))
 
 a = Analysis(
     [script_file],
     pathex=[os.path.abspath('.')],
-    binaries=[],
+    binaries=collect_dynamic_libs('gi'), # ✨ Автоматический сбор библиотек gi
     datas=datas,
     hiddenimports=[],
     hookspath=[],
