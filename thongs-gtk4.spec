@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
-from PyInstaller.utils.hooks import get_gi_typelibs
+from PyInstaller.utils.hooks.gobject import get_gi_typelibs # ✨ ПРАВИЛЬНЫЙ ПУТЬ ИМПОРТА
 import glob
 
 block_cipher = None
