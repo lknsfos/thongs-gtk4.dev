@@ -1,11 +1,16 @@
-import sys
-import os
+import os, sys, glob
 
-# --- САМЫЙ ВАЖНЫЙ ФИКС: ЯВНАЯ ИНИЦИАЛИЗАЦИЯ ПУТИ ---
-# Этот код должен быть самым первым, до импорта чего-либо из GTK.
-if hasattr(sys, '_MEIPASS'):
-    # Указываем PyGObject искать typelib в папке, которую мы создали в .spec файле
-    os.environ['GI_TYPELIB_PATH'] = os.path.join(sys._MEIPASS, 'gi', 'typelib')
+if hasattr(sys, "_MEIPASS"):
+    base = os.path.normpath(sys._MEIPASS)
+    matches = glob.glob(os.path.join(base, "**", "gi", "typelib"), recursive=True)
+    matches = [os.path.normpath(m) for m in matches if os.path.isdir(m)]
+    if matches:
+        candidate = matches[0]
+        # нормализация на случай двойного _internal
+        candidate = candidate.replace(os.path.join('_internal','_internal'), os.path.join('_internal'))
+        candidate = os.path.normpath(candidate)
+        os.environ["GI_TYPELIB_PATH"] = candidate
+        print(f"DEBUG: (entry) GI_TYPELIB_PATH set to: {candidate}", file=sys.stderr)
 
 from thongssh_gtk.app import main
 
