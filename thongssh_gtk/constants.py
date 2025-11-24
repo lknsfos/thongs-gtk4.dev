@@ -15,8 +15,10 @@ def resource_path(relative_path, in_module=True):
             return os.path.join(sys._MEIPASS, 'thongssh_gtk', relative_path)
         return os.path.join(sys._MEIPASS, relative_path)
 
-    # In development, the path is relative to the thongssh_gtk directory
-    return os.path.join(os.path.dirname(__file__), relative_path)
+    # In development, the path is relative to the project root,
+    # assuming constants.py is in thongssh_gtk/
+    project_root = os.path.dirname(os.path.dirname(__file__))
+    return os.path.join(project_root, 'thongssh_gtk', relative_path)
 
 # --- КОЛОНКИ TreeStore ---
 # (Имя, Тип, Иконка, Объект данных (config/node))

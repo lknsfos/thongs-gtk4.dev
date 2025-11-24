@@ -31,7 +31,7 @@ class ThongSSHApp(Adw.Application):
         try:
             res_path = resource_path("thongssh.gresource", in_module=False) # Use the helper function
             Gio.resources_register(Gio.Resource.load(res_path))
-        except gi.repository.GLib.GError as e:
+        except GLib.Error as e:
             logging.warning(f"Could not register resources: {e}")
         self.connect('activate', self.on_activate)
 
