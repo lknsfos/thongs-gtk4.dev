@@ -1,27 +1,29 @@
-import sys, os, traceback
+import os
+import sys
+import glob
 
-# Диагностика: какие модули с "gobject" уже загружены и откуда они
-for name, mod in list(sys.modules.items()):
-    if name == 'gobject' or 'gobject' in name:
-        print(f"DEBUG-MODULE: {name} -> {getattr(mod, '__file__', None)}", file=sys.stderr)
+def _collapse_internal(path: str) -> str:
+    return os.path.normpath(path.replace(os.path.join('_internal','_internal'), os.path.join('_internal')))
 
-# Диагностика: показать sys.path и первые 40 записей в окружении, полезно для поиска site-packages
-print("DEBUG-SYSPATH:", file=sys.stderr)
-for p in sys.path:
-    print("  ", p, file=sys.stderr)
-print("DEBUG-ENV GI_TYPELIB_PATH:", os.environ.get('GI_TYPELIB_PATH'), file=sys.stderr)
-
+# Установить GI_TYPELIB_PATH если запущено из PyInstaller
 if hasattr(sys, "_MEIPASS"):
     base = os.path.normpath(sys._MEIPASS)
     matches = glob.glob(os.path.join(base, "**", "gi", "typelib"), recursive=True)
     matches = [os.path.normpath(m) for m in matches if os.path.isdir(m)]
     if matches:
-        candidate = matches[0]
-        # нормализация на случай двойного _internal
-        candidate = candidate.replace(os.path.join('_internal','_internal'), os.path.join('_internal'))
-        candidate = os.path.normpath(candidate)
+        candidate = _collapse_internal(matches[0])
         os.environ["GI_TYPELIB_PATH"] = candidate
         print(f"DEBUG: (entry) GI_TYPELIB_PATH set to: {candidate}", file=sys.stderr)
+
+# Удаляем любые предзагруженные "gobject" и "gi" записи, чтобы gi.repository инициализировался корректно
+for name in list(sys.modules.keys()):
+    if name == "gobject" or name.startswith("gobject."):
+        print(f"DEBUG: removing preloaded module: {name}", file=sys.stderr)
+        sys.modules.pop(name, None)
+for name in list(sys.modules.keys()):
+    if name == "gi" or name.startswith("gi."):
+        print(f"DEBUG: removing preloaded gi module: {name}", file=sys.stderr)
+        sys.modules.pop(name, None)
 
 from thongssh_gtk.app import main
 
