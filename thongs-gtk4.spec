@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 import glob
+
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 import sys
 
@@ -18,21 +19,15 @@ datas.append(('thongssh_gtk/thongssh.gresource', '.'))
 _typelib_dirs = [
     '/usr/lib/girepository-1.0',
     '/usr/lib64/girepository-1.0',
-    '/usr/local/lib/girepository-1.0',
     '/usr/lib/x86_64-linux-gnu/girepository-1.0',
+    '/usr/local/lib/girepository-1.0',
 ]
 _typelib_datas = []
-_found = False
 for _d in _typelib_dirs:
     if os.path.isdir(_d):
         for _f in glob.glob(os.path.join(_d, '*.typelib')):
-            _typelib_datas.append((_f, os.path.join('_internal', 'gi', 'typelib')))
-            _found = True
-
-# debug: если не найдено, попытаться добавить всё из /usr/lib (без ломки сборки)
-if not _found:
-    for _f in glob.glob('/usr/lib/**/*.typelib', recursive=True):
-        _typelib_datas.append((_f, os.path.join('_internal', 'gi', 'typelib')))
+            # целевая папка внутри dist: gi/typelib
+            _typelib_datas.append((_f, os.path.join('gi', 'typelib')))
 
 # объединяем с существующими datas (если есть)
 datas = (globals().get('datas') or []) + _typelib_datas

@@ -8,33 +8,45 @@ import os
 import sys
 import glob
 
-def _collapse_internal(path: str) -> str:
-    # убирает повторяющиеся "_internal/_internal"
-    part = os.path.join('_internal', '_internal')
-    while part in path:
-        path = path.replace(part, os.path.join('_internal'))
-    return os.path.normpath(path)
+def _find_typelib_dir(base):
+    # ищем папки "typelib" рекурсивно и возвращаем первую с реальными .typelib файлами
+    cand = glob.glob(os.path.join(base, '**', 'typelib'), recursive=True)
+    for p in sorted(set(os.path.normpath(m) for m in cand)):
+        try:
+            files = [f for f in os.listdir(p) if f.endswith('.typelib')]
+        except Exception:
+            files = []
+        if files:
+            return p
+    # fallback: директория gi/typelib непосредственно под base/_internal или base
+    for trial in (
+        os.path.join(base, '_internal', 'gi', 'typelib'),
+        os.path.join(base, 'gi', 'typelib'),
+    ):
+        trial = os.path.normpath(trial)
+        if os.path.isdir(trial):
+            try:
+                files = [f for f in os.listdir(trial) if f.endswith('.typelib')]
+            except Exception:
+                files = []
+            if files:
+                return trial
+    return None
 
 def _set_typelib_path():
     if not hasattr(sys, '_MEIPASS'):
         return
     base = os.path.normpath(sys._MEIPASS)
-    matches = glob.glob(os.path.join(base, '**', 'gi', 'typelib'), recursive=True)
-    matches = [os.path.normpath(m) for m in matches if os.path.isdir(m)]
-    if not matches:
-        fallback = os.path.normpath(os.path.join(base, '_internal', 'gi', 'typelib'))
-        if os.path.isdir(fallback):
-            matches = [fallback]
-    if not matches:
-        print("DEBUG: No gi/typelib directory found inside sys._MEIPASS", file=sys.stderr)
+    typedir = _find_typelib_dir(base)
+    if not typedir:
+        print("DEBUG: No gi/typelib directory with .typelib files found inside sys._MEIPASS", file=sys.stderr)
         return
-    candidate = _collapse_internal(matches[0])
-    os.environ['GI_TYPELIB_PATH'] = candidate
+    typedir = os.path.normpath(typedir)
+    os.environ['GI_TYPELIB_PATH'] = typedir
+    print(f"DEBUG: GI_TYPELIB_PATH explicitly set to: {typedir}", file=sys.stderr)
     try:
-        files = sorted(os.listdir(candidate))
+        print(f"DEBUG: typelibs in that dir: {sorted([f for f in os.listdir(typedir) if f.endswith('.typelib')])[:300]}", file=sys.stderr)
     except Exception:
-        files = []
-    print(f"DEBUG: GI_TYPELIB_PATH explicitly set to: {candidate}", file=sys.stderr)
-    print(f"DEBUG: typelibs in that dir: {files[:200]}", file=sys.stderr)
+        pass
 
 _set_typelib_path()
