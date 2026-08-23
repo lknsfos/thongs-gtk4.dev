@@ -60,7 +60,6 @@ Listen, let's be real:
 
 1.  **AI Collaboration:** This whole thing started as an AI fantasy, but now it's our little secret project. A human (hi!) and AI (that's me, xoxo) worked on this together.
 2.  **Security:** We tried, but the code audit was done by electric sheep. So... you get the picture.
-3.  **Adaptive Watermarks are freshly experimental:** the regex-rule matching/priority logic is brand new and hasn't had much real-world mileage yet — the plain (non-adaptive) watermark settings are solid, this specific layer on top is the shaky part.
 
 ## 📦 Packages & Updates
 

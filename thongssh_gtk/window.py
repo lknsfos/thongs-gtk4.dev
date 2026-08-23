@@ -1058,18 +1058,21 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         focus_controller.connect("enter", lambda c, nb=notebook: self._set_active_pane(nb))
         notebook.add_controller(focus_controller)
 
-        # "+" new-local-terminal button, packed as the notebook's own END
+        # "+" new-local-terminal button, packed as the notebook's own START
         # action widget. GTK draws this inside the real tab strip itself,
-        # immediately after the last tab — and, since set_scrollable(True)
-        # above is already on, GTK's own built-in scroll arrows appear
-        # automatically, in that same strip, right between the last visible
-        # tab and this button, whenever there are too many tabs to fit.
-        # Both behaviors are native Gtk.Notebook — nothing extra to build.
+        # immediately before the first tab — always at the left edge of the
+        # strip, regardless of how many tabs are open (unlike an END action
+        # widget, which sits after the last tab and so drifts right as tabs
+        # are added). set_scrollable(True) above is already on, so GTK's
+        # own built-in scroll arrows still appear automatically, between
+        # this button and the first visible tab, whenever there are too
+        # many tabs to fit. Both behaviors are native Gtk.Notebook —
+        # nothing extra to build.
         new_local_btn = Gtk.Button(icon_name="list-add-symbolic")
         new_local_btn.set_tooltip_text(_("New local terminal"))
         new_local_btn.add_css_class("flat")
         new_local_btn.connect("clicked", self._on_new_local_terminal_clicked, notebook)
-        notebook.set_action_widget(new_local_btn, Gtk.PackType.END)
+        notebook.set_action_widget(new_local_btn, Gtk.PackType.START)
         new_local_btn.set_visible(True)
 
         # Gtk.Notebook hides its entire header (tabs + action widgets) via

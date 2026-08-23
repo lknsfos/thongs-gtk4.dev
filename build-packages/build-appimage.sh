@@ -443,6 +443,15 @@ trap 'rm -f "$PIXBUF_CACHE"' EXIT
 sed "s|@APPDIR@|$HERE|g" "$HERE/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache" > "$PIXBUF_CACHE"
 export GDK_PIXBUF_MODULE_FILE="$PIXBUF_CACHE"
 export XDG_DATA_DIRS="$HERE/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+# GSETTINGS_SCHEMA_DIR takes priority over the XDG_DATA_DIRS-based schema
+# lookup above (GLib checks it first, unconditionally) — belt-and-suspenders
+# so our bundled GTK4's own org.gtk.gtk4.Settings.* schema (see stage_b.sh)
+# always wins over an older host system's version, instead of depending on
+# directory-search ordering. Without this, a host whose own GTK4 is older
+# than what we bundled hits a fatal GLib-GIO-ERROR the moment the file
+# chooser opens (a schema key our GTK4 expects doesn't exist yet in the
+# host's older schema) — reproduced on Ubuntu 22.04, not on 24.04.
+export GSETTINGS_SCHEMA_DIR="$HERE/usr/share/glib-2.0/schemas"
 PYVER="$(ls "$HERE/usr/lib" | grep -m1 '^python3\.')"
 export PYTHONHOME="$HERE/usr"
 export PYTHONPATH="$HERE/usr/lib/$PYVER:$HERE/usr/lib/$PYVER/site-packages:$HERE/usr/lib/thongssh${PYTHONPATH:+:$PYTHONPATH}"
@@ -516,6 +525,34 @@ for typelib in Gtk-4.0 Adw-1 Vte-3.91 Gio-2.0 GLib-2.0 GObject-2.0 GModule-2.0 G
         echo "  !! missing typelib: $typelib" >&2
     fi
 done
+
+echo "==> GSettings schemas (bundled GTK4's own org.gtk.gtk4.Settings.*)"
+# GTK4's file chooser (and emoji/color choosers) read/write their own state
+# via GSettings, using a schema GTK4 itself installs to
+# $PREFIX/share/glib-2.0/schemas/ during "ninja install" above — not one
+# from gsettings-desktop-schemas. GSettings resolves a schema ID by walking
+# XDG_DATA_DIRS' glib-2.0/schemas/ dirs (AppRun already puts this AppDir's
+# own usr/share first — see GSETTINGS_SCHEMA_DIR below for the stronger
+# guarantee), and previously nothing ever put *our* build's schema there at
+# all, so it silently fell through to whatever schema the HOST distro's own
+# system GTK4 package happens to ship. On a distro whose system GTK4 is
+# older than 4.12.5 (Ubuntu 22.04 ships 4.6.9), that schema is missing keys
+# our newer bundled GTK4 unconditionally reads/writes (e.g. "view-type" on
+# org.gtk.gtk4.Settings.FileChooser) — not a warning, a fatal
+# GLib-GIO-ERROR the instant the file chooser opens, aborting the process.
+# A newer host (e.g. 24.04, already >=4.12) happens to already have that
+# key, which is why this only ever showed up on 22.04.
+mkdir -p "$APPDIR/usr/share/glib-2.0/schemas"
+if ls /opt/thongssh-stack/share/glib-2.0/schemas/*.xml >/dev/null 2>&1; then
+    cp /opt/thongssh-stack/share/glib-2.0/schemas/*.xml "$APPDIR/usr/share/glib-2.0/schemas/"
+else
+    echo "  !! no GSettings schema .xml files found in the built stack" >&2
+fi
+# Compiled explicitly rather than relying on GTK4's own meson.build having
+# already done it as a post-install step during Stage A — harmless if it
+# already did (glib-compile-schemas is idempotent), but not something to
+# depend on staying true across a future GTK4 version bump.
+/opt/thongssh-stack/bin/glib-compile-schemas "$APPDIR/usr/share/glib-2.0/schemas/"
 
 echo "==> Resolving + bundling shared libraries with linuxdeploy (patchelf disabled)"
 # patchelf rewriting RPATHs on a bundled Python interpreter/its C-extension

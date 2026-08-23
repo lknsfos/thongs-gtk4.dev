@@ -1,5 +1,21 @@
 # Release Notes
 
+### 🔧 What's New in 0.9.4
+
+Mostly small fixes and a couple of new logging-related settings, plus a macOS icon fix and an AppImage crash fix:
+
+* **Fixed the local terminal's watermark not updating as you `cd` around** — it stayed frozen on whatever directory the tab started in (if the watermark template uses `$name`), even though the tab's own title kept live-updating. Both now track the shell's actual current directory together.
+* **The sidebar's "Local Terminal" entry is now just "local"** — a fixed label, not translated, so it reads the same in every language (like "ThongSSH" itself). New local tabs (the "+" button, or reconnecting) are now named `local: <dir>` (lowercase, space after the colon) instead of `Local:<dir>`.
+* **Moved the "+" new-local-terminal button to the left of the tab strip** — it's pinned before the first tab now, always at the left edge regardless of how many tabs are open, instead of sitting after the last tab and drifting right as they accumulate.
+* **New: "Automatically save session logs"** (Settings → Terminal → Logging) — starts every new connection, including the local terminal, with logging already on, instead of needing the per-host switch or the terminal's own "Save log" menu item by hand.
+* **New: "Skip full-screen interactive apps in logs"** (Settings → Terminal → Logging, on by default) — vim, mc, tmux, htop, less, and similar full-screen terminal apps redraw the whole screen on every keystroke; without this, every single one of those redraws got written to the session log. Now they're detected and left out, with a marker noting the gap.
+* **"Client Options" is no longer a separate settings page** — its contents (executable paths, log directory) moved into the Terminal page, next to the two new logging switches above, since they were really just more terminal settings.
+* **Cross-platform local-shell directory tracking** — the "current directory" used for tab naming/watermarks now works on macOS/BSD too (via `lsof`/`procstat`), not just Linux's `/proc`.
+* **Fixed the host-tree search bar losing focus to GTK's own built-in type-to-search popup** — a stray keystroke while the tree had focus could pop up GTK's own search box on top of ours instead of typing into it.
+* **Forced UI language no longer fights text direction on macOS** — picking Hebrew or Arabic as the UI language, on a system whose own locale is LTR, used to also flip layout direction and trip a libadwaita header-bar rendering bug on macOS specifically. Text direction now follows the system locale, independent of the chosen translation.
+* **Fixed the macOS Dock icon showing the logo floating on a transparent background** — the regular icon has a soft alpha fade at its edges (by design, so it blends into Linux docks), which macOS's own runtime Dock-icon override doesn't composite against anything. A dedicated opaque-background variant is used for that specific case now; the app bundle's own static icon and every Linux asset are unaffected.
+* **Fixed the AppImage crashing outright the moment a file chooser opened, on Ubuntu 22.04 specifically** (worked fine on 24.04) — the bundled GTK4 is newer than 22.04's own system GTK4 and expects a GSettings schema key ("view-type" on `org.gtk.gtk4.Settings.FileChooser`) that 22.04's older schema doesn't have; GLib treats that as fatal rather than just warning. The AppImage now bundles and forces its own matching schema instead of relying on whatever the host system happens to have.
+
 ### 🌍 What's New in 0.9.3
 
 ThongSSH now speaks 13 languages, and a handful of Quickies-panel rough edges got sanded down:
