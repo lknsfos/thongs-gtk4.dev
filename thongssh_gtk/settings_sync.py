@@ -29,6 +29,24 @@ already on disk (see ai_chat_store.py) — they sync as individual files
 under `<shared_folder>/ai_chats/<uuid>.json`, not embedded in the single
 hashed blob below, so a new chat message doesn't require rehashing every
 host and setting too. Everything else lives in one file, `thongssh_sync.json`.
+
+Archive identity (`sync_id`): a random tag stamped into the shared file
+the first time any machine ever writes to a given archive, and mirrored
+into this machine's own sync_state.json once adopted. `sync.folder` is
+just a path string — nothing stops it from being repointed at an
+unrelated, already-populated folder (the wrong shared drive, a co-worker's
+folder that happens to sit at a similar-looking path, a cloud folder that
+got remounted somewhere else) — and `last_synced_version`/`base_snapshot`
+alone can't tell that apart from "still the same archive I've always
+talked to", since neither is tied to *which* archive produced them. Before
+this existed, pointing at the wrong folder by mistake could make the merge
+below treat everything that folder doesn't happen to share with this
+machine as "deleted elsewhere" — silently corrupting a real, unrelated
+archive, which then propagates to every other machine that syncs against
+it next. perform_sync now refuses to merge across a `sync_id` mismatch
+without an explicit `confirmed_sync_id` from the caller (see its
+docstring and SyncResult.needs_confirmation) — the same idea as a
+git remote's identity, just for a plain shared folder.
 """
 
 import hashlib
@@ -36,6 +54,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 
 from . import ai_chat_store
@@ -49,13 +68,37 @@ SYNC_FILE_NAME = "thongssh_sync.json"
 SYNC_STATE_FILE = CONFIG_DIR / "sync_state.json"
 
 
+def _new_sync_id():
+    # Short enough to read/compare by eye in Settings (see get_known_sync_id
+    # and the confirmation dialog window.py builds around
+    # SyncResult.needs_confirmation), long enough that two independently
+    # created archives colliding by chance is a non-concern for this —
+    # worst case of a collision is a spurious "different archive, are you
+    # sure?" prompt that never should have fired, not silent data loss.
+    return uuid.uuid4().hex[:12]
+
+
+def get_known_sync_id():
+    """The sync_id this machine last adopted — None if it's never
+    completed a sync (or its bookkeeping was cleared via reset_sync_state).
+    Settings -> Sync shows this so two machines can eyeball-compare that
+    they're actually talking to the same archive."""
+    state = _load_json(SYNC_STATE_FILE, default={}) or {}
+    return state.get("sync_id")
+
+
 def reset_sync_state():
     """Forgets this machine's sync history (last_synced_version/
-    base_snapshot/ai_chat_ids) so the next perform_sync() treats it as a
-    brand-new first-ever sync: local state becomes authoritative and gets
-    pushed to whatever's at sync.folder, instead of merged against a
-    now-meaningless history. Deliberately does NOT touch local hosts.json/
-    settings.json/ai chats — only the local bookkeeping file.
+    base_snapshot/ai_chat_ids/sync_id) so the next perform_sync() treats it
+    as a brand-new first-ever sync: an empty destination gets seeded from
+    this machine's local state, a destination that already has real content
+    gets safely merged into (base-less, so nothing looks "deleted" on
+    either side) rather than either side just overwriting the other.
+    Deliberately does NOT touch local hosts.json/settings.json/ai chats —
+    only the local bookkeeping file. Also means the very next sync adopts
+    whatever sync_id it finds (or mints a new one) with no confirmation
+    prompt — this is the one intentional way to walk away from the
+    archive this machine used to be paired with.
 
     Meant for the user to trigger by hand after pointing sync.folder at a
     genuinely different/empty share (a remounted drive, a new machine's
@@ -104,7 +147,8 @@ _EMPTY_ROOT = {"type": "group", "name": "Root", "children": []}
 
 
 class SyncResult:
-    def __init__(self, ok, error=None, changed_categories=None, new_config_data=None):
+    def __init__(self, ok, error=None, changed_categories=None, new_config_data=None,
+                 needs_confirmation=False, remote_sync_id=None, remote_info=None):
         self.ok = ok
         self.error = error
         self.changed_categories = changed_categories or set()
@@ -112,9 +156,21 @@ class SyncResult:
         # (window.py) should assign this over its own self.config_data and
         # repopulate the tree, rather than re-reading hosts.json itself.
         self.new_config_data = new_config_data
+        # The three below are only set together, when this machine's known
+        # sync_id doesn't match the shared folder's own — see perform_sync's
+        # docstring. `ok` is False whenever this is True: nothing was
+        # touched, local and remote, this pass. The caller should show a
+        # confirmation prompt (remote_sync_id/remote_info give it something
+        # concrete to show — "connect to archive <id>, last synced <time>,
+        # N hosts?") and, only if the user agrees, call perform_sync again
+        # with confirmed_sync_id=remote_sync_id.
+        self.needs_confirmation = needs_confirmation
+        self.remote_sync_id = remote_sync_id
+        self.remote_info = remote_info or {}
 
     def __repr__(self):
-        return f"SyncResult(ok={self.ok}, error={self.error!r}, changed={self.changed_categories})"
+        return (f"SyncResult(ok={self.ok}, error={self.error!r}, changed={self.changed_categories}, "
+                f"needs_confirmation={self.needs_confirmation})")
 
 
 # --- Small, self-contained JSON helpers (same atomic tmp+replace idiom
@@ -302,6 +358,20 @@ def merge_children(base_children, local_children, remote_children, remote_wins):
     return result
 
 
+def _count_hosts(root):
+    """Recursive host-node count — used only for the archive-mismatch
+    confirmation prompt's summary (SyncResult.remote_info), so the user has
+    something concrete to sanity-check ("that's my other machine's 12
+    hosts, yes" vs. "12 hosts?? I don't recognize this at all")."""
+    total = 0
+    for child in (root or _EMPTY_ROOT).get("children", []):
+        if child.get("type") == "host":
+            total += 1
+        else:
+            total += _count_hosts(child)
+    return total
+
+
 def merge_host_tree(base_root, local_root, remote_root, remote_wins):
     merged_children = merge_children(
         (base_root or _EMPTY_ROOT).get("children", []),
@@ -413,12 +483,19 @@ def _gather_flat(settings_manager, keys):
 
 # --- Top-level orchestration ---
 
-def perform_sync(settings_manager, config_data):
+def perform_sync(settings_manager, config_data, confirmed_sync_id=None):
     """Runs one full sync pass. Safe to call from a background thread —
     touches only settings.json/hosts.json/ai chat files/the shared folder,
     never a GTK widget. The caller (window.py) is responsible for
     reflecting SyncResult.changed_categories back onto live widgets
-    (tree/quickies-listbox/terminal colors) via GLib.idle_add afterward."""
+    (tree/quickies-listbox/terminal colors) via GLib.idle_add afterward.
+
+    confirmed_sync_id: pass the SAME value as a just-returned
+    SyncResult.remote_sync_id to proceed past that result's
+    needs_confirmation=True — i.e. "yes, I mean to connect to this
+    (different) archive". Anything else (None on a normal call, or a stale
+    value from a stale confirmation) is simply ignored if it doesn't match
+    what this pass actually finds at sync.folder right now."""
     folder = (settings_manager.get("sync.folder") or "").strip()
     if not folder:
         return SyncResult(False, error=_("No sync folder configured."))
@@ -479,6 +556,43 @@ def perform_sync(settings_manager, config_data):
         return SyncResult(False, error=msg)
 
     remote_payload = remote_payload or {}
+
+    # --- Archive identity check (see the module docstring's "Archive
+    # identity" section for the full story) ---
+    remote_sync_id = remote_payload.get("sync_id")
+    known_sync_id = state.get("sync_id")
+
+    if remote_sync_id and known_sync_id and remote_sync_id != known_sync_id and remote_sync_id != confirmed_sync_id:
+        return SyncResult(
+            False,
+            error=_("This folder belongs to a different sync archive than the one this machine last used."),
+            needs_confirmation=True,
+            remote_sync_id=remote_sync_id,
+            remote_info={
+                "version": remote_payload.get("version"),
+                "host_count": _count_hosts(remote_payload.get("hosts")),
+                "quicky_count": len((remote_payload.get("quickies") or {}).get("items") or []),
+            },
+        )
+
+    # Adopting a sync_id this pass — either this machine has never synced
+    # anything before (known_sync_id is None: nothing to protect, and if
+    # the remote already has real content, e.g. a pre-existing archive or
+    # a version of this app that predates sync_id entirely, its history is
+    # preserved below exactly as before), a brand-new archive is being
+    # created right now (remote_sync_id is None too: also nothing to
+    # protect), or the user just explicitly confirmed switching archives
+    # above (confirmed_sync_id matched). Only that last case is a genuine
+    # archive switch — a *different* archive's history has nothing to do
+    # with this machine's old base_snapshot, so it's reset exactly like
+    # the user's own "Reset Sync State" button does, rather than risking a
+    # stale base making unrelated items on either side look "deleted".
+    switched_archive = bool(known_sync_id) and bool(remote_sync_id) and remote_sync_id != known_sync_id
+    sync_id = remote_sync_id or known_sync_id or _new_sync_id()
+    if switched_archive:
+        base_snapshot = {}
+        last_synced_version = 0
+
     remote_wins = (remote_payload.get("version") or 0) > last_synced_version
 
     changed = set()
@@ -594,6 +708,7 @@ def perform_sync(settings_manager, config_data):
 
         new_version = time.time()
         new_remote_payload["version"] = new_version
+        new_remote_payload["sync_id"] = sync_id
         body_for_hash = {k: v for k, v in new_remote_payload.items() if k != "hash"}
         new_remote_payload["hash"] = compute_hash(body_for_hash)
         _atomic_write_json(sync_file, new_remote_payload)
@@ -602,6 +717,7 @@ def perform_sync(settings_manager, config_data):
             "last_synced_version": new_version,
             "base_snapshot": new_base_snapshot,
             "ai_chat_ids": new_known_ids,
+            "sync_id": sync_id,
         })
 
         settings_manager.set("sync.last_sync_at", new_version)

@@ -1439,7 +1439,12 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         self.sync_timer_id = GLib.timeout_add_seconds(interval, self._on_sync_timer_tick)
 
     def _on_sync_timer_tick(self):
-        self.force_sync_now()
+        # interactive=False: an archive-identity mismatch (see
+        # force_sync_now/_on_sync_finished) should never pop a confirmation
+        # dialog out of nowhere from an unattended background timer —
+        # it's surfaced as a status message instead, and stays that way
+        # until the user notices and clicks "Sync Now" by hand.
+        self.force_sync_now(interactive=False)
         return True  # keep repeating
 
     def on_sync_button_clicked(self, button):
@@ -1473,12 +1478,21 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         dialog.connect("response", on_response)
         dialog.present()
 
-    def force_sync_now(self):
+    def force_sync_now(self, confirmed_sync_id=None, interactive=True):
         """Runs one sync pass on a background thread (file I/O against a
         possibly cloud-synced folder shouldn't block the UI) and marshals
         the resulting UI refresh back via GLib.idle_add — same shape as
         ai_providers.send_chat_request. A pass already in flight is never
-        overlapped with another one."""
+        overlapped with another one.
+
+        confirmed_sync_id: passed straight through to perform_sync — set
+        this (to a SyncResult.remote_sync_id) when re-running after the
+        user has explicitly agreed to connect to a different archive (see
+        _on_sync_finished/_prompt_sync_archive_switch below).
+        interactive: whether _on_sync_finished is allowed to pop the
+        archive-switch confirmation dialog if this pass needs one — False
+        for the unattended periodic timer (see _on_sync_timer_tick), True
+        for anything the user just clicked."""
         if self.sync_in_progress:
             return
         self.sync_in_progress = True
@@ -1488,17 +1502,21 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         config_data = self.config_data
 
         def worker():
-            result = settings_sync.perform_sync(self.settings_manager, config_data)
-            GLib.idle_add(self._on_sync_finished, result)
+            result = settings_sync.perform_sync(self.settings_manager, config_data, confirmed_sync_id=confirmed_sync_id)
+            GLib.idle_add(self._on_sync_finished, result, interactive)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_sync_finished(self, result):
+    def _on_sync_finished(self, result, interactive=True):
         self.sync_in_progress = False
         self.sync_button.set_sensitive(True)
         if result.ok:
             when = datetime.datetime.fromtimestamp(self.settings_manager.get("sync.last_sync_at")).strftime("%H:%M:%S")
             self.sync_button.set_tooltip_text(_("Sync now (last: {time})").format(time=when))
+        elif result.needs_confirmation:
+            self.sync_button.set_tooltip_text(_("Sync paused — different archive at this folder, needs confirmation"))
+            if interactive:
+                self._prompt_sync_archive_switch(result)
         else:
             self.sync_button.set_tooltip_text(_("Sync failed: {error}").format(error=result.error))
             logging.error(f"Sync failed: {result.error}")
@@ -1513,6 +1531,45 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         if "terminal" in result.changed_categories or "general" in result.changed_categories:
             self.apply_watermark_settings_to_all()
         return False
+
+    def _prompt_sync_archive_switch(self, result):
+        """Shown when perform_sync refuses to merge because the sync
+        folder's own sync_id doesn't match the one this machine last used
+        (see settings_sync.py's "Archive identity" docs) — i.e. sync.folder
+        now points somewhere that either never talked to this machine
+        before, or belongs to a different, unrelated archive entirely.
+        Confirming re-runs the sync with that archive's id explicitly
+        accepted; declining leaves everything untouched, exactly as
+        perform_sync already left it, and the button's tooltip (already
+        set by the caller) as the only record something needs attention."""
+        info = result.remote_info or {}
+        when = (datetime.datetime.fromtimestamp(info["version"]).strftime("%Y-%m-%d %H:%M:%S")
+                if info.get("version") else _("unknown"))
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading=_("Connect to a Different Sync Archive?"),
+            body=_(
+                "The sync folder now contains a different archive than the one this machine last "
+                "used (id {sync_id}, last synced {when}, {hosts} hosts, {quickies} Quickies).\n\n"
+                "This can happen on purpose (a new shared folder, a teammate's archive) or by "
+                "mistake (the wrong folder was chosen). Continuing merges this machine's local "
+                "hosts/settings into it — nothing is deleted on either side, but from then on this "
+                "machine treats that archive as the one it syncs with."
+            ).format(
+                sync_id=result.remote_sync_id, when=when,
+                hosts=info.get("host_count", 0), quickies=info.get("quicky_count", 0),
+            ),
+        )
+        dialog.add_response("cancel", _("Cancel"))
+        dialog.add_response("connect", _("Connect and Sync Now"))
+        dialog.set_response_appearance("connect", Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def on_response(dialog, response):
+            if response == "connect":
+                self.force_sync_now(confirmed_sync_id=result.remote_sync_id)
+
+        dialog.connect("response", on_response)
+        dialog.present()
 
     def refresh_ai_provider_buttons(self):
         """Rebuilds the AI panel's per-provider toggle buttons (in its own

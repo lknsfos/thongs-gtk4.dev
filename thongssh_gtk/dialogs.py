@@ -19,6 +19,7 @@ from .launcher_icon import apply_launcher_icon
 from .keyring import KeyringManager
 from .ai_providers import DEFAULT_MODELS as AI_DEFAULT_MODELS, DEFAULT_BASE_URLS as AI_DEFAULT_BASE_URLS, fetch_models
 from .cli_providers import is_available as cli_is_available
+from . import settings_sync
 
 from .i18n import _, LANGUAGES
 
@@ -1352,6 +1353,20 @@ class SettingsDialog(Adw.Window):
         group_sync_status = Adw.PreferencesGroup()
         page_sync.add(group_sync_status)
 
+        # Lets two machines eyeball-compare that they're actually talking
+        # to the same archive — every sync file gets a random id the first
+        # time any machine writes to it (see settings_sync.py's "Archive
+        # identity" docs), and perform_sync refuses to merge across a
+        # mismatch without confirmation, but a human glance beats waiting
+        # to find out the hard way.
+        sync_id_row = Adw.ActionRow(title=_("Sync Archive ID"))
+        self.sync_id_label = Gtk.Label(xalign=1)
+        self.sync_id_label.add_css_class("dim-label")
+        self.sync_id_label.set_selectable(True)
+        sync_id_row.add_suffix(self.sync_id_label)
+        group_sync_status.add(sync_id_row)
+        self._refresh_sync_id_label()
+
         sync_status_row = Adw.ActionRow(title=_("Force Sync Now"))
         self.sync_status_label = Gtk.Label(xalign=1)
         self.sync_status_label.add_css_class("dim-label")
@@ -2512,6 +2527,10 @@ class SettingsDialog(Adw.Window):
                 self.sync_folder_row.set_text(gfile.get_path())
         dialog.destroy()
 
+    def _refresh_sync_id_label(self):
+        sync_id = settings_sync.get_known_sync_id()
+        self.sync_id_label.set_text(sync_id if sync_id else _("Not synced yet"))
+
     def _refresh_sync_status_label(self):
         last_sync_at = self.settings_manager.get("sync.last_sync_at")
         last_error = self.settings_manager.get("sync.last_sync_error")
@@ -2554,6 +2573,7 @@ class SettingsDialog(Adw.Window):
                 attempts[0] += 1
                 return attempts[0] < 200  # ~20s ceiling, then give up quietly
             self._refresh_sync_status_label()
+            self._refresh_sync_id_label()
             return False
         GLib.timeout_add(100, poll)
 
