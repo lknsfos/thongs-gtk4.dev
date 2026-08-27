@@ -1,5 +1,14 @@
 # Release Notes
 
+### 🔒 What's New in 0.9.5
+
+Sync got a real safety net against a genuine data-corruption bug, and Quickies gained a display option:
+
+* **Fixed a real Sync bug that could fork or corrupt an archive** — `sync.folder` is just a path, and nothing tied a machine's sync history to *which* archive it actually came from. Repointing it at an unrelated (but populated) folder, or a machine's very first-ever sync racing a cloud client (Dropbox/iCloud/etc.) that hadn't finished delivering the real archive yet, could make the merge treat the other archive's own hosts/settings as "deleted" and silently corrupt it — a real, reproduced case of exactly this happening between a Linux machine and a Mac.
+* **New: Sync archives now have their own identity** — every sync file gets a random id the first time any machine writes to it. Settings → Sync shows the current one ("Sync Archive ID") so two machines can eyeball-confirm they're talking to the same archive.
+* **New: confirmation before connecting to a different archive, or creating a new one** — if a sync folder's id doesn't match what this machine last used, or neither side has an id yet (ambiguous: could be a genuinely new folder, or one that just hasn't finished syncing down), nothing is touched and a dialog asks first, with details (id, last synced, host/Quicky counts) to sanity-check against. Declining leaves everything exactly as it was.
+* **New: "Show command preview"** (Settings → Quickies → Panel, on by default) — turns off the second line under each Quicky's name showing its command text, for anyone who'd rather keep the panel to just names.
+
 ### 🔧 What's New in 0.9.4
 
 Mostly small fixes and a couple of new logging-related settings, plus a macOS icon fix and an AppImage crash fix:

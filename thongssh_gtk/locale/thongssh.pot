@@ -6,7 +6,7 @@
 #, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: ThongSSH 0.9.4\n"
+"Project-Id-Version: ThongSSH 0.9.5\n"
 "Report-Msgid-Bugs-To: https://github.com/lknsfos/thongssh/issues\n"
 "POT-Creation-Date: 2026-08-19 21:07+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
