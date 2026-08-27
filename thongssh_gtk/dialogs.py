@@ -1487,6 +1487,13 @@ class SettingsDialog(Adw.Window):
         )
         group_quickies_settings.add(self.quickies_search_position_row)
 
+        self.quickies_show_command_preview_row = Adw.SwitchRow(
+            title=_("Show command preview"),
+            subtitle=_("Shows each Quicky's command text as a second line under its name in the panel")
+        )
+        self.quickies_show_command_preview_row.set_active(self.settings_manager.get("quickies.show_command_preview"))
+        group_quickies_settings.add(self.quickies_show_command_preview_row)
+
         group_quickies_items = Adw.PreferencesGroup(title=_("Snippets"))
         page_quickies.add(group_quickies_items)
 
@@ -2297,6 +2304,7 @@ class SettingsDialog(Adw.Window):
             "quickies.search_position",
             quickies_search_position_map_rev.get(self.quickies_search_position_row.get_selected(), "bottom")
         )
+        self.settings_manager.set("quickies.show_command_preview", self.quickies_show_command_preview_row.get_active())
         quickies_items = []
         for row in self.quickies_store:
             quickies_items.append({"name": row[0], "text": row[1]})
@@ -2669,6 +2677,7 @@ class SettingsDialog(Adw.Window):
             self.quickies_enabled_row.set_active(DEFAULT_SETTINGS["quickies.enabled"])
             self.quickies_position_row.set_selected({"above": 0, "below": 1}.get(DEFAULT_SETTINGS["quickies.position"], 1))
             self.quickies_search_position_row.set_selected({"top": 0, "bottom": 1}.get(DEFAULT_SETTINGS["quickies.search_position"], 1))
+            self.quickies_show_command_preview_row.set_active(DEFAULT_SETTINGS["quickies.show_command_preview"])
             self.quickies_store.clear()
             for quicky in DEFAULT_SETTINGS.get("quickies.items", []):
                 self.quickies_store.append([quicky.get("name", ""), quicky.get("text", "")])

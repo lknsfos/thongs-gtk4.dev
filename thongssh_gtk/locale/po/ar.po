@@ -2120,3 +2120,9 @@ msgstr "تخطي التطبيقات التفاعلية بملء الشاشة ف�
 
 msgid "Leaves editors, file managers, and other full-screen terminal apps (vim, mc, tmux, htop, less…) out of the log — otherwise every single keystroke redraws the whole screen, and every redraw gets logged"
 msgstr "يستبعد من السجل المحررات ومديري الملفات وتطبيقات الطرفية الأخرى بملء الشاشة (vim وmc وtmux وhtop وless…) — وإلا فإن كل ضغطة مفتاح تعيد رسم الشاشة بأكملها، وكل إعادة رسم تُسجَّل"
+
+msgid "Show command preview"
+msgstr "إظهار معاينة الأمر"
+
+msgid "Shows each Quicky's command text as a second line under its name in the panel"
+msgstr "يعرض أمر كل سريعة كسطر ثانٍ أسفل اسمها في اللوحة"

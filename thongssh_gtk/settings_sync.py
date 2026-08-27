@@ -47,6 +47,17 @@ it next. perform_sync now refuses to merge across a `sync_id` mismatch
 without an explicit `confirmed_sync_id` from the caller (see its
 docstring and SyncResult.needs_confirmation) — the same idea as a
 git remote's identity, just for a plain shared folder.
+
+The same confirmation is also required to CREATE a new archive (neither
+this machine nor the folder has a sync_id yet), not just to switch
+between two already-identified ones — a machine's first-ever sync has no
+local history to sanity-check against, so an empty-looking folder is
+indistinguishable from a cloud-synced one (Dropbox/iCloud/etc.) whose
+client just hasn't finished delivering an already-existing archive yet.
+Proceeding unconfirmed in that case would silently mint a competing
+sync_id and fork the archive — a real, reproduced bug (a second machine's
+very first sync raced its cloud client and won, before that client had
+actually delivered the first machine's archive down to it).
 """
 
 import hashlib
@@ -473,6 +484,7 @@ def _gather_quickies(settings_manager):
         "enabled": settings_manager.get("quickies.enabled"),
         "position": settings_manager.get("quickies.position"),
         "search_position": settings_manager.get("quickies.search_position"),
+        "show_command_preview": settings_manager.get("quickies.show_command_preview"),
         "items": settings_manager.get("quickies.items") or [],
     }
 
@@ -483,7 +495,7 @@ def _gather_flat(settings_manager, keys):
 
 # --- Top-level orchestration ---
 
-def perform_sync(settings_manager, config_data, confirmed_sync_id=None):
+def perform_sync(settings_manager, config_data, confirmed_sync_id=None, confirmed_new_archive=False):
     """Runs one full sync pass. Safe to call from a background thread —
     touches only settings.json/hosts.json/ai chat files/the shared folder,
     never a GTK widget. The caller (window.py) is responsible for
@@ -495,7 +507,13 @@ def perform_sync(settings_manager, config_data, confirmed_sync_id=None):
     needs_confirmation=True — i.e. "yes, I mean to connect to this
     (different) archive". Anything else (None on a normal call, or a stale
     value from a stale confirmation) is simply ignored if it doesn't match
-    what this pass actually finds at sync.folder right now."""
+    what this pass actually finds at sync.folder right now.
+
+    confirmed_new_archive: set True to proceed past a needs_confirmation
+    result whose remote_sync_id is None — "yes, create/seed a new archive
+    here", for when neither this machine nor the folder has an identity
+    yet (see the "No archive identity anywhere yet" check below for why
+    that's confirmed rather than just assumed)."""
     folder = (settings_manager.get("sync.folder") or "").strip()
     if not folder:
         return SyncResult(False, error=_("No sync folder configured."))
@@ -575,18 +593,44 @@ def perform_sync(settings_manager, config_data, confirmed_sync_id=None):
             },
         )
 
+    # No archive identity anywhere yet — neither this machine nor the
+    # folder remembers one. This is deliberately NOT auto-approved just
+    # because it "looks" like a brand-new folder: a machine's *very first*
+    # sync ever has no history to fall back on, so the has_synced_before
+    # guards above (which protect a RETURNING machine from mistaking "not
+    # mounted yet" for "everything was deleted") don't apply to it at all.
+    # A cloud-synced folder (Dropbox/iCloud/etc.) whose client just hasn't
+    # finished delivering an already-existing archive down to this machine
+    # yet looks EXACTLY like a genuinely empty folder from here — and
+    # proceeding anyway mints a brand-new, unrelated sync_id and pushes it,
+    # forking the archive: this is precisely how a real "the Mac synced
+    # first, before its iCloud copy of the file had actually arrived,
+    # invented its own identity and overwrote the Linux machine's" bug
+    # played out. Confirming here is the same kind of decision as an
+    # archive-mismatch above — just "create one" instead of "switch to
+    # this one" — so it reuses the exact same needs_confirmation shape,
+    # with remote_sync_id=None marking which case it is.
+    if not remote_sync_id and not known_sync_id and not confirmed_new_archive:
+        return SyncResult(
+            False,
+            error=_("No existing sync archive found at this folder yet."),
+            needs_confirmation=True,
+            remote_sync_id=None,
+            remote_info={},
+        )
+
     # Adopting a sync_id this pass — either this machine has never synced
-    # anything before (known_sync_id is None: nothing to protect, and if
-    # the remote already has real content, e.g. a pre-existing archive or
-    # a version of this app that predates sync_id entirely, its history is
-    # preserved below exactly as before), a brand-new archive is being
-    # created right now (remote_sync_id is None too: also nothing to
-    # protect), or the user just explicitly confirmed switching archives
-    # above (confirmed_sync_id matched). Only that last case is a genuine
-    # archive switch — a *different* archive's history has nothing to do
-    # with this machine's old base_snapshot, so it's reset exactly like
-    # the user's own "Reset Sync State" button does, rather than risking a
-    # stale base making unrelated items on either side look "deleted".
+    # anything before but the remote already has real content (a
+    # pre-existing archive, or a version of this app that predates
+    # sync_id entirely — either way its history is preserved below exactly
+    # as before), a brand-new archive is being created right now (just
+    # confirmed above), or the user just explicitly confirmed switching to
+    # a different existing archive (confirmed_sync_id matched). Only that
+    # last case is a genuine archive switch — a *different* archive's
+    # history has nothing to do with this machine's old base_snapshot, so
+    # it's reset exactly like the user's own "Reset Sync State" button
+    # does, rather than risking a stale base making unrelated items on
+    # either side look "deleted".
     switched_archive = bool(known_sync_id) and bool(remote_sync_id) and remote_sync_id != known_sync_id
     sync_id = remote_sync_id or known_sync_id or _new_sync_id()
     if switched_archive:
@@ -620,6 +664,7 @@ def perform_sync(settings_manager, config_data, confirmed_sync_id=None):
                 "enabled": merge_scalar(base_q.get("enabled", _MISSING), local_q["enabled"], remote_q.get("enabled"), remote_wins),
                 "position": merge_scalar(base_q.get("position", _MISSING), local_q["position"], remote_q.get("position"), remote_wins),
                 "search_position": merge_scalar(base_q.get("search_position", _MISSING), local_q["search_position"], remote_q.get("search_position"), remote_wins),
+                "show_command_preview": merge_scalar(base_q.get("show_command_preview", _MISSING), local_q["show_command_preview"], remote_q.get("show_command_preview"), remote_wins),
                 "items": merge_list(base_q.get("items"), local_q["items"], remote_q.get("items"), lambda i: i.get("name"), remote_wins),
             }
             if merged_q != local_q:
@@ -627,6 +672,7 @@ def perform_sync(settings_manager, config_data, confirmed_sync_id=None):
                 settings_manager.set("quickies.enabled", merged_q["enabled"])
                 settings_manager.set("quickies.position", merged_q["position"])
                 settings_manager.set("quickies.search_position", merged_q["search_position"])
+                settings_manager.set("quickies.show_command_preview", merged_q["show_command_preview"])
                 settings_manager.set("quickies.items", merged_q["items"])
             new_remote_payload["quickies"] = merged_q
             new_base_snapshot["quickies"] = merged_q

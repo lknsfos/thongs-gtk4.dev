@@ -87,6 +87,7 @@ DEFAULT_SETTINGS = {
     "quickies.position": "below", # "above" or "below" the host tree, within the left panel
     "quickies.items": [], # [{"name": str, "text": str}, ...] — inserted (not executed) into the active terminal
     "quickies.search_position": "bottom", # "top" or "bottom" — where the Quickies search box sits, relative to the snippet list
+    "quickies.show_command_preview": True, # Whether each Quicky's command text shows as a second line under its name in the panel
     "ai.system_prompt": (
         "You are a read-only analysis assistant for a terminal session. You have no shell, "
         "tool, or network access of your own — never attempt to run, execute, connect to, "

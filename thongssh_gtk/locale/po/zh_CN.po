@@ -2078,3 +2078,9 @@ msgstr "在日志中跳过全屏交互式应用"
 
 msgid "Leaves editors, file managers, and other full-screen terminal apps (vim, mc, tmux, htop, less…) out of the log — otherwise every single keystroke redraws the whole screen, and every redraw gets logged"
 msgstr "将编辑器、文件管理器等全屏终端应用(vim、mc、tmux、htop、less 等)排除在日志之外——否则每按一次键都会重绘整个屏幕,每次重绘都会被记录"
+
+msgid "Show command preview"
+msgstr "显示命令预览"
+
+msgid "Shows each Quicky's command text as a second line under its name in the panel"
+msgstr "在面板中每个锦囊名称下方显示其命令内容作为第二行"

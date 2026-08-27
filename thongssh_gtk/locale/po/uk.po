@@ -2143,3 +2143,9 @@ msgstr "Не записувати в журнал повноекранні ін�
 
 msgid "Leaves editors, file managers, and other full-screen terminal apps (vim, mc, tmux, htop, less…) out of the log — otherwise every single keystroke redraws the whole screen, and every redraw gets logged"
 msgstr "Виключає з журналу редактори, файлові менеджери та інші повноекранні застосунки термінала (vim, mc, tmux, htop, less…) — інакше кожне натискання клавіші перемальовує весь екран, і кожне перемальовування потрапляє до журналу"
+
+msgid "Show command preview"
+msgstr "Показувати команду"
+
+msgid "Shows each Quicky's command text as a second line under its name in the panel"
+msgstr "Показує команду кожного шустрика другим рядком під його назвою на панелі"

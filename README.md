@@ -63,7 +63,7 @@ Listen, let's be real:
 
 ## 📦 Packages & Updates
 
-Prebuilt `.deb`, `.rpm`, and macOS `.dmg` packages are up on the [Releases page](https://github.com/lknsfos/thongssh/releases) — grab one if you'd rather not run from source.
+Prebuilt `.deb`, `.rpm`, `.AppImage`, and macOS `.dmg` packages are up on the [Releases page](https://github.com/lknsfos/thongssh/releases) — grab one if you'd rather not run from source.
 
 ## 💅 What You'll Need (System Dependencies)
 

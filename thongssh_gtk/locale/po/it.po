@@ -2146,3 +2146,9 @@ msgstr "Escludi le app interattive a schermo intero dai log"
 
 msgid "Leaves editors, file managers, and other full-screen terminal apps (vim, mc, tmux, htop, less…) out of the log — otherwise every single keystroke redraws the whole screen, and every redraw gets logged"
 msgstr "Esclude dal log editor, gestori di file e altre app da terminale a schermo intero (vim, mc, tmux, htop, less…) — altrimenti ogni singola pressione di tasto ridisegna l'intero schermo, e ogni ridisegno viene registrato"
+
+msgid "Show command preview"
+msgstr "Mostra anteprima del comando"
+
+msgid "Shows each Quicky's command text as a second line under its name in the panel"
+msgstr "Mostra il comando di ogni rapidino come seconda riga sotto il suo nome nel pannello"

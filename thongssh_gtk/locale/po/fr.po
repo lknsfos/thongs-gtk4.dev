@@ -2150,3 +2150,9 @@ msgstr "Ignorer les applications interactives plein écran dans les journaux"
 
 msgid "Leaves editors, file managers, and other full-screen terminal apps (vim, mc, tmux, htop, less…) out of the log — otherwise every single keystroke redraws the whole screen, and every redraw gets logged"
 msgstr "Exclut du journal les éditeurs, gestionnaires de fichiers et autres applications de terminal plein écran (vim, mc, tmux, htop, less…) — sinon, chaque frappe redessine tout l'écran, et chaque redessin est journalisé"
+
+msgid "Show command preview"
+msgstr "Afficher l'aperçu de la commande"
+
+msgid "Shows each Quicky's command text as a second line under its name in the panel"
+msgstr "Affiche la commande de chaque vite-fait sur une deuxième ligne sous son nom dans le panneau"

@@ -1478,17 +1478,18 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         dialog.connect("response", on_response)
         dialog.present()
 
-    def force_sync_now(self, confirmed_sync_id=None, interactive=True):
+    def force_sync_now(self, confirmed_sync_id=None, confirmed_new_archive=False, interactive=True):
         """Runs one sync pass on a background thread (file I/O against a
         possibly cloud-synced folder shouldn't block the UI) and marshals
         the resulting UI refresh back via GLib.idle_add — same shape as
         ai_providers.send_chat_request. A pass already in flight is never
         overlapped with another one.
 
-        confirmed_sync_id: passed straight through to perform_sync — set
-        this (to a SyncResult.remote_sync_id) when re-running after the
-        user has explicitly agreed to connect to a different archive (see
-        _on_sync_finished/_prompt_sync_archive_switch below).
+        confirmed_sync_id/confirmed_new_archive: passed straight through
+        to perform_sync — set one of these when re-running after the user
+        has explicitly agreed to (respectively) connect to a different
+        archive, or create/seed a new one (see _on_sync_finished/
+        _prompt_sync_archive_switch below).
         interactive: whether _on_sync_finished is allowed to pop the
         archive-switch confirmation dialog if this pass needs one — False
         for the unattended periodic timer (see _on_sync_timer_tick), True
@@ -1502,7 +1503,10 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         config_data = self.config_data
 
         def worker():
-            result = settings_sync.perform_sync(self.settings_manager, config_data, confirmed_sync_id=confirmed_sync_id)
+            result = settings_sync.perform_sync(
+                self.settings_manager, config_data,
+                confirmed_sync_id=confirmed_sync_id, confirmed_new_archive=confirmed_new_archive,
+            )
             GLib.idle_add(self._on_sync_finished, result, interactive)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1514,7 +1518,7 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             when = datetime.datetime.fromtimestamp(self.settings_manager.get("sync.last_sync_at")).strftime("%H:%M:%S")
             self.sync_button.set_tooltip_text(_("Sync now (last: {time})").format(time=when))
         elif result.needs_confirmation:
-            self.sync_button.set_tooltip_text(_("Sync paused — different archive at this folder, needs confirmation"))
+            self.sync_button.set_tooltip_text(_("Sync paused — archive identity needs confirmation"))
             if interactive:
                 self._prompt_sync_archive_switch(result)
         else:
@@ -1533,15 +1537,53 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         return False
 
     def _prompt_sync_archive_switch(self, result):
-        """Shown when perform_sync refuses to merge because the sync
-        folder's own sync_id doesn't match the one this machine last used
-        (see settings_sync.py's "Archive identity" docs) — i.e. sync.folder
-        now points somewhere that either never talked to this machine
-        before, or belongs to a different, unrelated archive entirely.
-        Confirming re-runs the sync with that archive's id explicitly
-        accepted; declining leaves everything untouched, exactly as
+        """Shown when perform_sync refuses to proceed over an archive-
+        identity question (see settings_sync.py's "Archive identity"
+        docs) — one of two distinct cases, told apart by
+        result.remote_sync_id:
+
+        - Not None: the sync folder holds a DIFFERENT archive than the one
+          this machine last used — sync.folder was repointed at something
+          else, on purpose or by mistake.
+        - None: NEITHER this machine nor the folder has an archive
+          identity yet. Could genuinely be a fresh folder, or could be a
+          cloud-synced folder (Dropbox/iCloud/...) whose client hasn't
+          finished delivering an already-existing archive down to this
+          machine yet — indistinguishable from here, which is exactly why
+          this asks instead of just assuming "fresh" (a real, reproduced
+          bug: a second machine's first-ever sync raced its cloud client
+          and lost, minting a competing archive before the first
+          machine's had actually arrived).
+
+        Either way, declining leaves everything untouched, exactly as
         perform_sync already left it, and the button's tooltip (already
         set by the caller) as the only record something needs attention."""
+        if result.remote_sync_id is None:
+            dialog = Adw.MessageDialog(
+                transient_for=self,
+                heading=_("Create a New Sync Archive?"),
+                body=_(
+                    "No existing sync archive was found at this folder — neither this machine nor "
+                    "the folder itself has one yet.\n\n"
+                    "If this is genuinely a new or empty folder, continuing is safe: it seeds the "
+                    "archive from this machine's current hosts/settings. But if this folder is "
+                    "supposed to already have an archive (e.g. a cloud-synced folder that just "
+                    "hasn't finished downloading yet), continuing now would create a SEPARATE, "
+                    "competing archive instead of joining the real one — wait and try again instead."
+                ),
+            )
+            dialog.add_response("cancel", _("Cancel"))
+            dialog.add_response("create", _("Create and Sync Now"))
+            dialog.set_response_appearance("create", Adw.ResponseAppearance.DESTRUCTIVE)
+
+            def on_response(dialog, response):
+                if response == "create":
+                    self.force_sync_now(confirmed_new_archive=True)
+
+            dialog.connect("response", on_response)
+            dialog.present()
+            return
+
         info = result.remote_info or {}
         when = (datetime.datetime.fromtimestamp(info["version"]).strftime("%Y-%m-%d %H:%M:%S")
                 if info.get("version") else _("unknown"))
@@ -1900,13 +1942,15 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         (title+subtitle combined), and the ask here is specifically for the
         Edit/Delete buttons to sit compact, matching just the name line,
         with the command preview as its own full-width line underneath
-        both the name AND the buttons."""
+        both the name AND the buttons — that preview line is optional
+        (Settings -> Quickies -> "Show command preview", on by default)."""
         child = self.quickies_listbox.get_first_child()
         while child is not None:
             next_child = child.get_next_sibling()
             self.quickies_listbox.remove(child)
             child = next_child
 
+        show_command_preview = self.settings_manager.get("quickies.show_command_preview")
         for index, quicky in enumerate(self.quickies_items):
             preview = quicky.get("text", "").replace("\n", " ").strip()
 
@@ -1957,7 +2001,7 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             row_box.set_margin_end(12)
             row_box.append(name_line)
 
-            if preview:
+            if preview and show_command_preview:
                 preview_label = Gtk.Label(label=preview, xalign=0)
                 preview_label.set_wrap(True)
                 preview_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)

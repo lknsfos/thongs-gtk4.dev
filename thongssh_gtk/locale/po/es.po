@@ -2147,3 +2147,9 @@ msgstr "Omitir aplicaciones interactivas a pantalla completa en los registros"
 
 msgid "Leaves editors, file managers, and other full-screen terminal apps (vim, mc, tmux, htop, less…) out of the log — otherwise every single keystroke redraws the whole screen, and every redraw gets logged"
 msgstr "Excluye del registro los editores, gestores de archivos y demás aplicaciones de terminal a pantalla completa (vim, mc, tmux, htop, less…) — de lo contrario, cada pulsación de tecla redibuja toda la pantalla, y cada redibujado queda registrado"
+
+msgid "Show command preview"
+msgstr "Mostrar vista previa del comando"
+
+msgid "Shows each Quicky's command text as a second line under its name in the panel"
+msgstr "Muestra el comando de cada rapidito como una segunda línea debajo de su nombre en el panel"
