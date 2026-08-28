@@ -123,7 +123,22 @@ APP_ID="$(sed -nE 's/^APP_ID[[:space:]]*=[[:space:]]*["'\'']([^"'\'']+)["'\''].*
 
 # 2. Install dependencies
 echo "🍺 Installing system dependencies via Homebrew..."
-$ARCH_PREFIX brew install gtk4 libadwaita vte3 gobject-introspection pygobject3 pkg-config sshpass create-dmg
+# NONINTERACTIVE stops brew from blocking this script on a "would you like
+# to upgrade N outdated dependencies? [y/n]" prompt — with no one there to
+# answer it, that just hangs forever instead of failing loudly.
+export NONINTERACTIVE=1
+# pygobject3 is deliberately NOT in this list — see the pip install below
+# for why building it via brew is broken specifically for x86_64 on an
+# Apple Silicon Mac (i.e. TARGET_ARCH=x86_64, running under Rosetta).
+BREW_FORMULAE=(gtk4 libadwaita vte3 gobject-introspection pkg-config sshpass create-dmg)
+if ! $ARCH_PREFIX brew install "${BREW_FORMULAE[@]}"; then
+    # Homebrew doesn't build from source on its own when a formula has no
+    # precompiled bottle for this OS/arch combo — it just refuses and
+    # exits. Retry explicitly asking it to build whatever's still missing;
+    # brew skips anything already installed, so this only compiles the gap.
+    echo "⚠️  brew install failed (likely a missing bottle for this arch) — retrying with --build-from-source. This can take a while."
+    $ARCH_PREFIX brew install --build-from-source "${BREW_FORMULAE[@]}"
+fi
 
 echo "🐍 Setting up Python environment..."
 $ARCH_PREFIX python3 -m venv --system-site-packages venv
@@ -133,9 +148,23 @@ echo "📦 Installing Python packages..."
 ${ARCH_PREFIX} pip install --upgrade pip
 ${ARCH_PREFIX} pip install -r requirements.txt
 ${ARCH_PREFIX} pip install py2app pyobjc-framework-cocoa pycairo
+# PyGObject (the "gi" module) is built via pip instead of brew's pygobject3
+# formula: under Rosetta (running this script with TARGET_ARCH=x86_64 on
+# an Apple Silicon Mac), `sysctl hw.cpufamily` reports back an ancient
+# Intel family ("Westmere"), and Homebrew's own build sandbox picks a
+# matching `-march=westmere` compiler flag for reproducible bottles —
+# which current Xcode Clang has dropped support for entirely, so building
+# pygobject3 from source (its only option once no bottle exists for this
+# arch) fails with "unsupported argument 'westmere' to option '-march='"
+# no matter what. pip's build (meson-python) doesn't go through that
+# Homebrew CPU-detection/optimization-flag machinery at all, so it isn't
+# affected — it only needs the underlying C libs, which the brew formulae
+# above already installed (gobject-introspection, gtk4, pkg-config).
+${ARCH_PREFIX} pip install pygobject
 
-echo "🔎 Verifying paramiko is installed (required for SFTP)..."
+echo "🔎 Verifying paramiko and PyGObject are installed..."
 ${ARCH_PREFIX} python -c "import paramiko" || { echo >&2 "🛑 paramiko is missing from the venv. Add it to requirements.txt."; exit 1; }
+${ARCH_PREFIX} python -c "import gi" || { echo >&2 "🛑 PyGObject (gi) failed to install/import."; exit 1; }
 
 # 3. Prepare resources
 echo "🎨 Creating .icns icon..."
