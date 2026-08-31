@@ -21,7 +21,7 @@ except ValueError as e:
     logging.shutdown() # Ensure logs are flushed before exit
     sys.exit(1)
 
-from gi.repository import Adw, Gio, Gtk, GdkPixbuf
+from gi.repository import Adw, Gio, Gtk, GdkPixbuf, GLib
 from .window import ThongSSHWindow # Keep relative import
 from .constants import APP_ID, resource_path # Import our new function
 from .settings import SettingsManager
@@ -123,6 +123,18 @@ def main():
             except TypeError:
                 logging.warning(f"Cannot kill PID: {pid}, it's not an int")
 
+    # Without this, GLib derives the program name (and, on X11, the
+    # window's WM_CLASS) from sys.argv[0] — which for `python3 thongssh.py`
+    # is the literal script path, so WM_CLASS ends up as "thongssh.py".
+    # That doesn't match any .desktop file's StartupWMClass=terminal.thongssh
+    # (or whatever APP_ID actually is), so the window manager can show the
+    # nice icon from the .desktop file for the startup-notification phase,
+    # then loses track of it the moment the real window maps and falls
+    # back to a generic icon — exactly the "icon shows, then disappears a
+    # few seconds later" symptom this fixes. Must be set before the first
+    # Gtk/Gio call that would otherwise set its own default (GLib doesn't
+    # let it change after that).
+    GLib.set_prgname(APP_ID)
     app = ThongSSHApp()
     return app.run(sys.argv)
 

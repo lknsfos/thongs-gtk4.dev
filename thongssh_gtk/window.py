@@ -77,6 +77,15 @@ class ThongSSHWindow(Adw.ApplicationWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        # The header bar's own Adw.WindowTitle (set up below) is what's
+        # actually visible day to day, but this is the window's *X11-level*
+        # title (_NET_WM_NAME/WM_NAME) — read by Alt-Tab switchers, taskbar
+        # tooltips, etc. Left unset, GTK defaults it to the process's
+        # prgname (see app.py's GLib.set_prgname), which is APP_ID
+        # ("terminal.thongssh") — technically correct-ish now, but still
+        # not the friendly name a window switcher should show.
+        self.set_title("ThongSSH")
+
         self.set_deletable(True)
 
         # Load and migrate the config
