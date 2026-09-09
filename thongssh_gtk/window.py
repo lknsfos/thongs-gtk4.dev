@@ -66,6 +66,61 @@ _WATERMARK_ALIGN = {
     "bottom-right": (Gtk.Align.END, Gtk.Align.END),
 }
 
+# Env vars build-appimage.sh's AppRun exports for its OWN bundled runtime's
+# benefit (a from-source-built GTK4/GLib stack, a bundled Python — see
+# that script's own comments) — never meant to also apply to whatever the
+# user runs *inside* a spawned terminal. Left alone, every one of these
+# leaks into a local-terminal shell (and its own children — apt hooks,
+# flatpak, anything), silently redirecting real system tools into the
+# AppImage's bundled libraries/Python stdlib instead of the host's own.
+# Real, reproduced fallout: Ubuntu's command-not-found handler crashing
+# with "No module named 'CommandNotFound'" (PYTHONHOME redirected a
+# *system* python3 script's own stdlib/site-packages lookup into the
+# bundle), and `flatpak` misbehaving during updates (LD_LIBRARY_PATH
+# preferring the bundle's own from-source glib/gio over the system's).
+_APPIMAGE_ENV_VARS_TO_CLEAN = [
+    "LD_LIBRARY_PATH", "GI_TYPELIB_PATH", "GDK_PIXBUF_MODULE_FILE",
+    "XDG_DATA_DIRS", "GSETTINGS_SCHEMA_DIR", "PYTHONHOME", "PYTHONPATH",
+]
+
+
+def _wrap_cmd_for_appimage_env(cmd, extra_env):
+    """Wraps `cmd` in a tiny `/bin/sh -c '...; exec "$@"'` that restores
+    the AppImage-polluted vars above to whatever they looked like before
+    AppRun touched them (or removes them if they weren't set at all), and
+    exports extra_env (the sshpass/SSHPASS case), before exec-ing into the
+    real command — same process, same pid, VTE/the pty never notice.
+
+    A *sibling* envv passed straight to spawn_sync would be the more
+    obvious way to do this, and was the first thing tried here — but
+    empirically, Vte.Terminal.spawn_sync's envv does NOT fully replace the
+    child's environment the way GLib's own spawn functions do; it merges
+    the given entries on top of the full inherited environment instead
+    (confirmed live: a variable simply left out of envv still leaked
+    through). A shell-level `unset`/`export`, run for real in the child
+    right before exec, has no such ambiguity.
+
+    Only called when there's actually something to do — see the call
+    site's own `if` guard, which is what keeps a normal, non-AppImage run
+    completely untouched (this function only runs at all once
+    THONGSSH_RUNNING_FROM_APPIMAGE is set, which no other way of running
+    this app ever sets)."""
+    parts = ["unset " + " ".join(_APPIMAGE_ENV_VARS_TO_CLEAN)]
+    for var in _APPIMAGE_ENV_VARS_TO_CLEAN:
+        # THONGSSH_APPIMAGE_HAD_<var> is only ever exported (as "1") when
+        # <var> genuinely had a value before AppRun touched it — see its
+        # own stash loop — so a plain -n check is enough, no +x needed.
+        parts.append(f'[ -n "$THONGSSH_APPIMAGE_HAD_{var}" ] && export {var}="$THONGSSH_APPIMAGE_ORIG_{var}"')
+    bookkeeping = ["THONGSSH_RUNNING_FROM_APPIMAGE"]
+    bookkeeping += [f"THONGSSH_APPIMAGE_HAD_{v}" for v in _APPIMAGE_ENV_VARS_TO_CLEAN]
+    bookkeeping += [f"THONGSSH_APPIMAGE_ORIG_{v}" for v in _APPIMAGE_ENV_VARS_TO_CLEAN]
+    parts.append("unset " + " ".join(bookkeeping))
+    for key, value in extra_env.items():
+        parts.append(f"export {key}={shlex.quote(value)}")
+    parts.append('exec "$@"')
+    return ["/bin/sh", "-c", "; ".join(parts), "sh"] + cmd
+
+
 # --- Main Window ---
 class ThongSSHWindow(Adw.ApplicationWindow):
 
@@ -4337,17 +4392,31 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             terminal.set_font(Pango.FontDescription.from_string(font_str))
             self._apply_color_scheme_to_terminal(terminal)
 
-            # An empty envv here (the common case — extra_env is only
-            # ever populated for the sshpass/SSHPASS case above) makes VTE
-            # spawn with an unmodified inherited environment, same as
-            # before; confirmed live (TERM/PATH/HOME all still present)
-            # rather than assumed, since passing a NON-empty envv fully
-            # *replaces* the child's environment instead of extending it —
-            # so the sshpass case has to build the full list itself, not
-            # just the one extra SSHPASS var.
-            envv = [f"{k}={v}" for k, v in os.environ.items()] if extra_env else []
-            for key, value in extra_env.items():
-                envv.append(f"{key}={value}")
+            # THONGSSH_RUNNING_FROM_APPIMAGE is only ever set by our own
+            # build-appimage.sh's AppRun — absent for every other way this
+            # app runs, so the wrapped-cmd branch is a guaranteed no-op
+            # outside the AppImage; everything below it is the exact,
+            # untouched original behavior for every other way this app
+            # runs (a git checkout, .deb/.rpm install, macOS .app, ...).
+            if os.environ.get("THONGSSH_RUNNING_FROM_APPIMAGE"):
+                # Handles restoring the AppImage-polluted vars AND
+                # exporting extra_env (SSHPASS) itself, via a real shell
+                # unset/export — see its own docstring for why envv isn't
+                # used for either purpose here.
+                cmd = _wrap_cmd_for_appimage_env(cmd, extra_env)
+                envv = []
+            else:
+                # An empty envv here (the common case — extra_env is only
+                # ever populated for the sshpass/SSHPASS case above) makes
+                # VTE spawn with an unmodified inherited environment, same
+                # as before; confirmed live (TERM/PATH/HOME all still
+                # present) rather than assumed, since passing a NON-empty
+                # envv fully *replaces* the child's environment instead of
+                # extending it — so the sshpass case has to build the full
+                # list itself, not just the one extra SSHPASS var.
+                envv = [f"{k}={v}" for k, v in os.environ.items()] if extra_env else []
+                for key, value in extra_env.items():
+                    envv.append(f"{key}={value}")
 
             success, pid = terminal.spawn_sync(
                 Vte.PtyFlags.DEFAULT,

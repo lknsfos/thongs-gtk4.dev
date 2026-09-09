@@ -431,6 +431,27 @@ cat > "$ASSETS_DIR/AppRun" <<'APPRUN_EOF'
 # — patchelf rewriting a bundled Python interpreter/its C-extension
 # modules is a well-known way to quietly corrupt it).
 HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+# Stash whatever these looked like BEFORE any of the exports below touch
+# them, and flag that this process tree is running from inside our own
+# AppImage — thongssh_gtk/window.py's local/ssh/telnet terminal spawning
+# reads these back to give a spawned shell (and anything IT runs — a
+# misspelled command's "command not found" handler, flatpak, apt, ...) a
+# clean, real system environment instead of quietly inheriting our
+# bundle's own GTK4/GLib/Python. THONGSSH_APPIMAGE_HAD_<var> marks "was
+# actually set, possibly to an empty string" vs. "wasn't set at all" — a
+# plain empty value can't tell those two apart on its own, and getting
+# that wrong would turn "restore" into "invent a bogus empty value".
+export THONGSSH_RUNNING_FROM_APPIMAGE=1
+for _thongssh_var in LD_LIBRARY_PATH GI_TYPELIB_PATH GDK_PIXBUF_MODULE_FILE \
+                     XDG_DATA_DIRS GSETTINGS_SCHEMA_DIR PYTHONHOME PYTHONPATH; do
+    if eval "[ \"\${${_thongssh_var}+set}\" = set ]"; then
+        eval "export THONGSSH_APPIMAGE_HAD_${_thongssh_var}=1"
+        eval "export THONGSSH_APPIMAGE_ORIG_${_thongssh_var}=\"\${${_thongssh_var}}\""
+    fi
+done
+unset _thongssh_var
+
 export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export GI_TYPELIB_PATH="$HERE/usr/lib/girepository-1.0${GI_TYPELIB_PATH:+:$GI_TYPELIB_PATH}"
 # loaders.cache as bundled has "@APPDIR@" placeholders (see stage_b.sh)
