@@ -1,5 +1,13 @@
 # Release Notes
 
+### 🐛 What's New in 0.9.5.1
+
+A patch release fixing three packaging-level bugs — nothing user-facing changed feature-wise, just three real bugs specific to prebuilt packages:
+
+* **Fixed the AppImage showing no icon in the dock/taskbar (or one that vanishes a few seconds after launch)** — the running window's `WM_CLASS` was being derived from `sys.argv[0]` (literally `thongssh.py` for a `python3 thongssh.py` launch), which never matched any `.desktop` file's `StartupWMClass`. The window manager could show the right icon during the startup-notification phase, then lost track of it the instant the real window mapped and fell back to a generic one. `GLib.set_prgname()` is now called explicitly before the app starts, so `WM_CLASS` matches `APP_ID` exactly like the `.desktop` file expects; the window's own X11 title is also set explicitly now ("ThongSSH" instead of the raw app id).
+* **Fixed a real environment-leak bug in the AppImage's local terminal** — `AppRun` exports `PYTHONHOME`/`PYTHONPATH`/`LD_LIBRARY_PATH`/etc. for its own bundled GTK4/Python runtime's benefit, and those were leaking, unmodified, into anything run inside the local terminal. Reproduced fallout: a misspelled command crashing Ubuntu's own "command not found" helper (`ModuleNotFoundError: No module named 'CommandNotFound'`, since `PYTHONHOME` redirected a *system* Python script into the bundle's stdlib instead), and `flatpak` misbehaving during updates (`LD_LIBRARY_PATH` preferring the bundle's own glib/gio build over the system's). Every terminal session spawned from an AppImage build now restores these to their real pre-AppImage values (or removes them if they were never set) before actually running anything.
+* **Fixed the macOS build failing on x86_64 when run on Apple Silicon (Rosetta)** — Homebrew's `pygobject3` formula failed to build from source under Rosetta with `unsupported argument 'westmere' to option '-march='` (Homebrew's CPU-detection picks a compiler flag current Xcode Clang has dropped). PyGObject is now installed via `pip` instead, which doesn't go through that machinery at all; `brew install` also now retries with `--build-from-source` if a precompiled bottle isn't available for a given formula/arch.
+
 ### 🔒 What's New in 0.9.5
 
 Sync got a real safety net against a genuine data-corruption bug, and Quickies gained a display option:
