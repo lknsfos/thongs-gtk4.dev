@@ -8,32 +8,24 @@ gi.require_version('Vte', '3.91')
 
 import os
 import sys
-import signal
 import shlex
 import copy
 import json
 import logging
 import datetime
 import re
-import platform
-import shutil
-import subprocess
 
-from gi.repository import Gtk, Adw, Gdk, GLib, Vte, Pango, Gio, GObject
+from gi.repository import Gtk, Adw, Gdk, GLib, Vte, Pango, Gio
 
 from .constants import APP_ID, COL_NAME, COL_TYPE, COL_ICON, COL_DATA, AI_STANDARD_PROVIDERS, CLI_STANDARD_PROVIDERS, WATERMARK_POSITIONS, resource_path, __version__
 from .cli_providers import is_available as cli_is_available
 from .dialogs import InputDialog, HostDialog, GroupDialog, BatchCommandDialog, QuickyDialog # Removed SettingsDialog
-from .send_file import SendFileDialog, guess_remote_cwd
 from .config import load_and_migrate_config, save_config, CONFIG_DIR
-from .paths import resolve_log_dir
-from .settings import SettingsManager
+from .tab_window_base import TerminalPaneWindow, _tabview_has_page
 from .launcher_icon import apply_launcher_icon
-from .keyring import KeyringManager
 from .sftp_widget import SftpWidget
 from .ai_panel import AiPanel
 from .provider_badges import icon_name_for as _icon_name_for, badge_family as _badge_family, badge_text as _badge_text
-from .colors import get_scheme_colors
 from .widgets import PositionGrid, set_split_button_active_style
 from . import settings_sync
 import threading
@@ -46,87 +38,9 @@ from .i18n import _
 # doesn't belong mixed in with actual preferences.
 WINDOW_STATE_FILE = CONFIG_DIR / "window_state.json"
 
-# PCRE2 compile-option bits used for in-terminal search (Vte.Regex wraps
-# PCRE2 directly and doesn't expose these as GI constants). Values are from
-# pcre2.h and are part of PCRE2's stable ABI.
-_PCRE2_CASELESS = 0x00000008
-_PCRE2_MULTILINE = 0x00000400
-
-# WATERMARK_POSITIONS (constants.py) ids -> (halign, valign) for the
-# terminal watermark overlay — every id there must have an entry here.
-_WATERMARK_ALIGN = {
-    "top-left": (Gtk.Align.START, Gtk.Align.START),
-    "top-center": (Gtk.Align.CENTER, Gtk.Align.START),
-    "top-right": (Gtk.Align.END, Gtk.Align.START),
-    "center-left": (Gtk.Align.START, Gtk.Align.CENTER),
-    "center": (Gtk.Align.CENTER, Gtk.Align.CENTER),
-    "center-right": (Gtk.Align.END, Gtk.Align.CENTER),
-    "bottom-left": (Gtk.Align.START, Gtk.Align.END),
-    "bottom-center": (Gtk.Align.CENTER, Gtk.Align.END),
-    "bottom-right": (Gtk.Align.END, Gtk.Align.END),
-}
-
-# Env vars build-appimage.sh's AppRun exports for its OWN bundled runtime's
-# benefit (a from-source-built GTK4/GLib stack, a bundled Python — see
-# that script's own comments) — never meant to also apply to whatever the
-# user runs *inside* a spawned terminal. Left alone, every one of these
-# leaks into a local-terminal shell (and its own children — apt hooks,
-# flatpak, anything), silently redirecting real system tools into the
-# AppImage's bundled libraries/Python stdlib instead of the host's own.
-# Real, reproduced fallout: Ubuntu's command-not-found handler crashing
-# with "No module named 'CommandNotFound'" (PYTHONHOME redirected a
-# *system* python3 script's own stdlib/site-packages lookup into the
-# bundle), and `flatpak` misbehaving during updates (LD_LIBRARY_PATH
-# preferring the bundle's own from-source glib/gio over the system's).
-_APPIMAGE_ENV_VARS_TO_CLEAN = [
-    "LD_LIBRARY_PATH", "GI_TYPELIB_PATH", "GDK_PIXBUF_MODULE_FILE",
-    "XDG_DATA_DIRS", "GSETTINGS_SCHEMA_DIR", "PYTHONHOME", "PYTHONPATH",
-]
-
-
-def _wrap_cmd_for_appimage_env(cmd, extra_env):
-    """Wraps `cmd` in a tiny `/bin/sh -c '...; exec "$@"'` that restores
-    the AppImage-polluted vars above to whatever they looked like before
-    AppRun touched them (or removes them if they weren't set at all), and
-    exports extra_env (the sshpass/SSHPASS case), before exec-ing into the
-    real command — same process, same pid, VTE/the pty never notice.
-
-    A *sibling* envv passed straight to spawn_sync would be the more
-    obvious way to do this, and was the first thing tried here — but
-    empirically, Vte.Terminal.spawn_sync's envv does NOT fully replace the
-    child's environment the way GLib's own spawn functions do; it merges
-    the given entries on top of the full inherited environment instead
-    (confirmed live: a variable simply left out of envv still leaked
-    through). A shell-level `unset`/`export`, run for real in the child
-    right before exec, has no such ambiguity.
-
-    Only called when there's actually something to do — see the call
-    site's own `if` guard, which is what keeps a normal, non-AppImage run
-    completely untouched (this function only runs at all once
-    THONGSSH_RUNNING_FROM_APPIMAGE is set, which no other way of running
-    this app ever sets)."""
-    parts = ["unset " + " ".join(_APPIMAGE_ENV_VARS_TO_CLEAN)]
-    for var in _APPIMAGE_ENV_VARS_TO_CLEAN:
-        # THONGSSH_APPIMAGE_HAD_<var> is only ever exported (as "1") when
-        # <var> genuinely had a value before AppRun touched it — see its
-        # own stash loop — so a plain -n check is enough, no +x needed.
-        parts.append(f'[ -n "$THONGSSH_APPIMAGE_HAD_{var}" ] && export {var}="$THONGSSH_APPIMAGE_ORIG_{var}"')
-    bookkeeping = ["THONGSSH_RUNNING_FROM_APPIMAGE"]
-    bookkeeping += [f"THONGSSH_APPIMAGE_HAD_{v}" for v in _APPIMAGE_ENV_VARS_TO_CLEAN]
-    bookkeeping += [f"THONGSSH_APPIMAGE_ORIG_{v}" for v in _APPIMAGE_ENV_VARS_TO_CLEAN]
-    parts.append("unset " + " ".join(bookkeeping))
-    for key, value in extra_env.items():
-        parts.append(f"export {key}={shlex.quote(value)}")
-    parts.append('exec "$@"')
-    return ["/bin/sh", "-c", "; ".join(parts), "sh"] + cmd
-
-
 # --- Main Window ---
-class ThongSSHWindow(Adw.ApplicationWindow):
+class ThongSSHWindow(TerminalPaneWindow):
 
-    open_sessions = {}
-    tab_data = {} # ✨ Store config for each tab widget
-    last_clicked_tab = None # ✨ Store the last right-clicked tab for context menu actions
     last_clicked_quicky_index = None # Store the last right-clicked Quicky's index for its context menu actions
 
     def __init__(self, *args, **kwargs):
@@ -146,7 +60,18 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         # Load and migrate the config
         self.config_data = load_and_migrate_config()
 
-        self.settings_manager = SettingsManager()
+        # Real ThongSSHApp-level singletons (see app.py) — same object/dict
+        # identity as every other window's, not fresh instances. Before
+        # detachable tabs, these were instantiated fresh per-window
+        # (SettingsManager/KeyringManager) or plain CLASS attributes
+        # (tab_data/open_sessions) — both only "worked" because a second
+        # top-level window never existed before; a DetachedTabWindow makes
+        # that untrue.
+        app = self.get_application()
+        self.settings_manager = app.settings_manager
+        self.keyring = app.keyring
+        self.tab_data = app.tab_data
+        self.open_sessions = app.open_sessions
 
         self._restore_window_geometry()
         self.connect("close-request", self._on_close_request)
@@ -160,8 +85,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         icon_theme.add_search_path(resource_path("icons"))
         self.set_icon_name(self.settings_manager.get("interface.icon"))
         apply_launcher_icon(self.settings_manager.get("interface.icon"))
-
-        self.keyring = KeyringManager()
 
         self.setup_css()
 
@@ -563,15 +486,25 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         self._apply_left_panel_layout()
 
         # --- Right Panel (Tabs, with up to 4-way split support) ---
-        # Four persistent Gtk.Notebook "panes" are created up front and never
-        # destroyed — the split-view buttons only ever reparent them into a
-        # different Gtk.Paned tree and move pages between them, so terminal
-        # PIDs / SFTP connections / tab_data entries (keyed by page widget)
-        # stay valid across split/merge/orientation changes.
+        # Four persistent "panes" (an Adw.TabBar + Adw.TabView pair, wrapped
+        # in a Gtk.Box — see _create_pane_tabview) are created up front and
+        # never destroyed — the split-view buttons only ever reparent their
+        # boxes into a different Gtk.Paned tree and move pages between the
+        # TabViews, so terminal PIDs / SFTP connections / tab_data entries
+        # (keyed by Adw.TabPage) stay valid across split/merge/orientation
+        # changes.
         self.split_mode = None  # None | 'vertical' | 'horizontal' | 'grid'
-        self.pane_notebooks = [self._create_pane_notebook() for _ in range(4)]
+        self._pane_boxes = []
+        self.pane_tabviews = []
+        self.pane_tab_bars = []
+        for _i in range(4):
+            _box, _tabview, _tab_bar = self._create_pane_tabview()
+            self._pane_boxes.append(_box)
+            self.pane_tabviews.append(_tabview)
+            self.pane_tab_bars.append(_tab_bar)
+        self._pane_box_by_tabview = dict(zip(self.pane_tabviews, self._pane_boxes))
         self.active_pane = None
-        self._set_active_pane(self.pane_notebooks[0])
+        self._set_active_pane(self.pane_tabviews[0])
         self._apply_pane_layout()
 
         self.connect("map", self.on_first_map)
@@ -1054,112 +987,93 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         # Icon column + expander indent + row/window padding allowance.
         return max(200, min(600, max_text_width + 80))
 
-    # --- Split-pane layout (up to 4 independent tab notebooks) ---
+    # --- Split-pane layout (up to 4 independent tab panes) ---
     #
     # Slots: 0=top-left (also "single"/"left"/"top"), 1=top-right (also
     # "right" in a 2-way vertical split), 2=bottom-left (also "bottom" in a
     # 2-way horizontal split), 3=bottom-right (grid only).
     #
     # Invariant: whenever split_mode is 'vertical' or 'horizontal' (a 2-way
-    # split), the two live notebooks are always pane_notebooks[0] and [1] —
+    # split), the two live panes are always pane_tabviews[0] and [1] —
     # only the Paned orientation differs. This is what lets switching
     # between vertical/horizontal just re-orient the same two panes with no
     # tab movement at all.
 
-    def _create_pane_notebook(self):
-        """Builds one persistent tab-notebook 'pane'. All 4 are created once
-        in __init__ and only ever reparented/emptied — never destroyed — so
-        widgets keyed in open_sessions/tab_data stay valid across layout
-        changes."""
-        notebook = Gtk.Notebook()
-        notebook.set_scrollable(True)
-        notebook.set_vexpand(True)
-        notebook.set_hexpand(True)
-        # ✨ Add a small margin to prevent accidentally grabbing a paned handle
-        notebook.set_margin_start(6)
-        notebook.connect("notify::page", self.update_menu_sensitivity)
+    def _create_pane_tabview(self):
+        """Builds one persistent tab 'pane': an Adw.TabBar over an
+        Adw.TabView, wrapped in a plain Gtk.Box so the pair threads through
+        _build_pane_layout_widget's Gtk.Paned tree as a single leaf widget.
+        All 4 are created once in __init__ and only ever reparented/emptied
+        — never destroyed — so widgets keyed in open_sessions/tab_data stay
+        valid across layout changes. Returns (box, tabview, tab_bar)."""
+        tabview = Adw.TabView()
+        tabview.set_vexpand(True)
+        tabview.set_hexpand(True)
         # Switching tabs within a pane can change which terminal is "the
         # active terminal" for watermark scope="active", independently of
         # _set_active_pane (which only tracks the active *pane*).
-        notebook.connect("notify::page", lambda nb, p: self.apply_watermark_settings_to_all())
+        tabview.connect("notify::selected-page", self._on_pane_page_changed)
+        # Native Adw.TabView plumbing — drag-to-reorder within a pane and
+        # drag-to-another-pane's-TabView both come for free from this (no
+        # custom Gtk.DragSource/DropTarget needed any more; see
+        # on_tabview_close_page/setup_menu/create_window/page_detached in
+        # tab_window_base.py for what each signal does).
+        tabview.connect("close-page", self.on_tabview_close_page)
+        tabview.connect("setup-menu", self.on_tabview_setup_menu)
+        tabview.connect("create-window", self.on_tabview_create_window)
+        tabview.connect("page-detached", self.on_tabview_page_detached)
+        tabview.set_menu_model(self.tab_menu_model)
 
-        # Cross-pane tab movement is a fully custom drag: a Gtk.DragSource on
-        # each tab label (added in _create_tab_label) hands off a plain
-        # string tab-id, and this DropTarget looks the widget back up by it.
-        # Earlier this used Gtk.Notebook's own tab-detachable + a DropTarget
-        # typed for Gtk.NotebookPage — reliable on Linux, but that custom
-        # GObject payload didn't survive the drag round-trip on macOS's
-        # Quartz backend: the source notebook would visually drop the tab
-        # (assuming the transfer succeeded) while the drop side never
-        # actually received it, leaving it orphaned until some unrelated
-        # redraw resynced the view and it "came back". A plain string is
-        # the one payload type every GDK backend's DnD implementation
-        # handles the same way, so there's no cross-platform quirk left to
-        # trip over here.
-        drop_target = Gtk.DropTarget.new(str, Gdk.DragAction.MOVE)
-        drop_target.connect("drop", self._on_pane_tab_drop, notebook)
-        notebook.add_controller(drop_target)
+        tab_bar = Adw.TabBar()
+        tab_bar.set_view(tabview)
+        tab_bar.set_autohide(False)
 
-        # Track "last interacted-with pane" as the active one. This used to
-        # rely solely on keyboard-focus "enter" (below), acting here only for
-        # a click on a pane with zero pages (nothing inside it to focus). But
-        # on GNOME/Wayland, rapidly alternating clicks between two panes can
-        # make the focus-enter notification lag or get dropped, leaving
-        # active_pane stuck on whichever pane last reliably reported it — so
-        # this now fires on every press, in capture phase, as a passive
-        # observer (never claims/denies the sequence) that can't interfere
-        # with clicks meant for a tab, a terminal, or anything else already
-        # inside the notebook.
-        click_controller = Gtk.GestureClick.new()
-        click_controller.set_button(0)  # any button
-        click_controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-        def on_pane_pressed(gesture, n_press, x, y, nb=notebook):
-            self._set_active_pane(nb)
-        click_controller.connect("pressed", on_pane_pressed)
-        notebook.add_controller(click_controller)
-
-        focus_controller = Gtk.EventControllerFocus.new()
-        focus_controller.connect("enter", lambda c, nb=notebook: self._set_active_pane(nb))
-        notebook.add_controller(focus_controller)
-
-        # "+" new-local-terminal button, packed as the notebook's own START
-        # action widget. GTK draws this inside the real tab strip itself,
-        # immediately before the first tab — always at the left edge of the
-        # strip, regardless of how many tabs are open (unlike an END action
-        # widget, which sits after the last tab and so drifts right as tabs
-        # are added). set_scrollable(True) above is already on, so GTK's
-        # own built-in scroll arrows still appear automatically, between
-        # this button and the first visible tab, whenever there are too
-        # many tabs to fit. Both behaviors are native Gtk.Notebook —
-        # nothing extra to build.
+        # "+" new-local-terminal button, packed as the tab bar's own START
+        # action widget — same "always at the left edge" placement the old
+        # Gtk.Notebook action widget had.
         new_local_btn = Gtk.Button(icon_name="list-add-symbolic")
         new_local_btn.set_tooltip_text(_("New local terminal"))
         new_local_btn.add_css_class("flat")
-        new_local_btn.connect("clicked", self._on_new_local_terminal_clicked, notebook)
-        notebook.set_action_widget(new_local_btn, Gtk.PackType.START)
-        new_local_btn.set_visible(True)
+        new_local_btn.connect("clicked", self._on_new_local_terminal_clicked, tabview)
+        tab_bar.set_start_action_widget(new_local_btn)
 
-        # Gtk.Notebook hides its entire header (tabs + action widgets) via
-        # a plain set_visible(False) on its own internal header box the
-        # moment it has zero pages — confirmed by walking the widget tree
-        # live, not just inferred from the empty screen. That's the ONE
-        # real widget holding the button above; forcing it back to visible
-        # (it never gets auto-hidden again afterwards — checked by adding
-        # then removing a page and re-reading get_visible()) shows that
-        # same strip empty-but-present from the start, "+" included, with
-        # no second stand-in widget to keep in sync. get_first_child() is
-        # relying on Gtk.Notebook's current internal layout (undocumented,
-        # but stable across GTK4's life so far) rather than public API —
-        # there isn't a public one for this. Logs one benign one-time
-        # Gtk-WARNING ("reported min height -3") the first time this state
-        # is entered, from GTK's own size negotiation momentarily measuring
-        # the now-forced-visible-but-genuinely-empty tab strip; harmless
-        # and doesn't repeat on further redraws/resizes.
-        notebook.get_first_child().set_visible(True)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        # ✨ Small margin to prevent accidentally grabbing a paned handle
+        box.set_margin_start(6)
+        box.append(tab_bar)
+        box.append(tabview)
 
-        return notebook
+        # Track "last interacted-with pane" as the active one — attached to
+        # the whole pane box (tab bar + tabview) so clicking either counts,
+        # same as a click anywhere on the old combined Gtk.Notebook widget
+        # did. This used to rely solely on keyboard-focus "enter" (below),
+        # acting here only for a click on a pane with zero pages (nothing
+        # inside it to focus). But on GNOME/Wayland, rapidly alternating
+        # clicks between two panes can make the focus-enter notification
+        # lag or get dropped, leaving active_pane stuck on whichever pane
+        # last reliably reported it — so this now fires on every press, in
+        # capture phase, as a passive observer (never claims/denies the
+        # sequence) that can't interfere with clicks meant for a tab, a
+        # terminal, or anything else already inside the pane.
+        click_controller = Gtk.GestureClick.new()
+        click_controller.set_button(0)  # any button
+        click_controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        def on_pane_pressed(gesture, n_press, x, y, tv=tabview):
+            self._set_active_pane(tv)
+        click_controller.connect("pressed", on_pane_pressed)
+        box.add_controller(click_controller)
 
-    def _on_new_local_terminal_clicked(self, button, notebook):
+        focus_controller = Gtk.EventControllerFocus.new()
+        focus_controller.connect("enter", lambda c, tv=tabview: self._set_active_pane(tv))
+        box.add_controller(focus_controller)
+
+        return box, tabview, tab_bar
+
+    def _on_pane_page_changed(self, tabview, pspec):
+        self.update_menu_sensitivity()
+        self.apply_watermark_settings_to_all()
+
+    def _on_new_local_terminal_clicked(self, button, tabview):
         """Opens a new local-terminal tab in this pane. If
         terminal.inherit_cwd_for_new_local_tab is on (the default), starts
         in the same directory as this pane's currently active tab, IF that
@@ -1170,12 +1084,11 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         component otherwise) so several local tabs stay distinguishable at
         a glance."""
         cwd = os.environ.get("HOME", os.path.expanduser("~"))
-        current_page = notebook.get_current_page()
-        if current_page != -1 and self.settings_manager.get("terminal.inherit_cwd_for_new_local_tab"):
-            page_widget = notebook.get_nth_page(current_page)
-            info = self.tab_data.get(page_widget)
+        current_page = tabview.get_selected_page()
+        if current_page is not None and self.settings_manager.get("terminal.inherit_cwd_for_new_local_tab"):
+            info = self.tab_data.get(current_page)
             if info and info.get("type") == "terminal" and info.get("config", {}).get("protocol") == "local":
-                session = self.open_sessions.get(page_widget)
+                session = self.open_sessions.get(current_page)
                 if session:
                     _terminal, pid = session
                     try:
@@ -1184,129 +1097,38 @@ class ThongSSHWindow(Adw.ApplicationWindow):
                         pass  # e.g. macOS (no /proc), or the process already exited
 
         label = self._dir_short_label(cwd)
-        self._set_active_pane(notebook)
+        self._set_active_pane(tabview)
         self.start_session({"name": f"local: {label}", "protocol": "local", "cwd": cwd})
 
-    def _on_pane_tab_drop(self, drop_target, value, x, y, dest_notebook):
-        """Accepts a tab dragged from another pane, OR reordered within the
-        same one — both handled here now, by drop position. `value` is the
-        plain string tab-id from the drag source's 'prepare' callback in
-        _create_tab_label.
-
-        This used to assume Gtk.Notebook's own tab_reorderable handled
-        same-notebook drags natively, before this handler ever saw them.
-        In practice, having our own Gtk.DragSource on the same tab-label
-        widget (needed for cross-pane moves, see _create_tab_label) claims
-        every drag gesture first, so the notebook's built-in reorder-drag
-        never gets a chance to fire at all — same-notebook drags always
-        ended up here anyway, and were silently dropped by the old
-        src_notebook-is-dest_notebook early return. Reordering is done by
-        hand below instead, using the drop's x position."""
-        child = self._find_page_widget_by_id(value)
-        if child is None:
-            return False
-        src_notebook = self._find_notebook_for_page_widget(child)
-        if src_notebook is None:
-            return False
-
-        target_index = self._tab_index_at_x(dest_notebook, x)
-
-        if src_notebook is dest_notebook:
-            current_index = dest_notebook.page_num(child)
-            # reorder_child's position is "the index after this child is
-            # pulled out of the list" — dropping past its own old slot
-            # needs shifting back by one to land where the cursor actually is.
-            if target_index > current_index:
-                target_index -= 1
-            if target_index == current_index:
-                return False  # dropped back where it already was — no-op
-            dest_notebook.reorder_child(child, target_index)
-            dest_notebook.set_current_page(dest_notebook.page_num(child))
-            return True
-
-        tab_label = src_notebook.get_tab_label(child)
-        # detach_tab() (not remove_page()) so the source notebook knows this
-        # was consumed by a drop rather than cancelled mid-drag.
-        src_notebook.detach_tab(child)
-        dest_notebook.insert_page(child, tab_label, target_index)
-        self._mark_tab_draggable(dest_notebook, child)
-        dest_notebook.set_current_page(dest_notebook.page_num(child))
-        self._set_active_pane(dest_notebook)
-        return True
-
-    def _tab_index_at_x(self, notebook, x):
-        """Which page index a drop at x (in notebook-relative coordinates)
-        should insert before — lets a tab be dropped at a specific spot in
-        the tab strip instead of always landing at the end."""
-        for i in range(notebook.get_n_pages()):
-            label = notebook.get_tab_label(notebook.get_nth_page(i))
-            ok, bounds = label.compute_bounds(notebook)
-            if ok and x < bounds.get_x() + bounds.get_width() / 2:
-                return i
-        return notebook.get_n_pages()
-
-    def _mark_tab_draggable(self, notebook, child):
-        """Tab movement — both reordering within one notebook and moving to
-        a different pane — is handled entirely by hand via the custom
-        DragSource/DropTarget pair (see _create_tab_label /
-        _create_pane_notebook / _on_pane_tab_drop), not Gtk.Notebook's own
-        tab-reorderable: the two can't coexist on the same tab-label widget
-        without one silently winning every gesture (see _on_pane_tab_drop's
-        docstring), so this is deliberately left off rather than fought with."""
-        notebook.set_tab_reorderable(child, False)
-
-    def _set_active_pane(self, notebook):
-        if self.active_pane is notebook:
+    def _set_active_pane(self, tabview):
+        if self.active_pane is tabview:
             return
         if self.active_pane is not None:
-            self.active_pane.remove_css_class("thongssh-active-pane")
-        self.active_pane = notebook
-        notebook.add_css_class("thongssh-active-pane")
+            self._pane_box_by_tabview[self.active_pane].remove_css_class("thongssh-active-pane")
+        self.active_pane = tabview
+        self._pane_box_by_tabview[tabview].add_css_class("thongssh-active-pane")
         self._sync_find_target_terminal()
-        # Guarded: this fires once during __init__ (line ~381) before the
-        # watermark toggle button exists yet, and open_sessions is always
-        # empty at that point anyway.
+        # Guarded: this fires once during __init__ before the watermark
+        # toggle button exists yet, and open_sessions is always empty at
+        # that point anyway.
         if hasattr(self, "watermark_toggle_button"):
             self.apply_watermark_settings_to_all()
 
-    def _get_active_notebook(self):
+    def _get_active_tabview(self):
         """The pane new tabs should open into / menu actions should target."""
-        if self.active_pane not in self.pane_notebooks:
-            self._set_active_pane(self.pane_notebooks[0])
+        if self.active_pane not in self.pane_tabviews:
+            self._set_active_pane(self.pane_tabviews[0])
         return self.active_pane
 
-    def _find_notebook_for_page_widget(self, widget):
-        """Which pane currently holds this tab's content widget, if any."""
-        for nb in self.pane_notebooks:
-            if nb.page_num(widget) != -1:
-                return nb
+    def _find_tabview_for_page(self, page):
+        """Which pane currently holds this tab's page, if any. Overrides
+        TerminalPaneWindow's single-tabview default since this window has
+        up to 4 — the target page may not be the one in the currently
+        *active* pane."""
+        for tv in self.pane_tabviews:
+            if _tabview_has_page(tv, page):
+                return tv
         return None
-
-    def _find_page_widget_by_id(self, tab_id):
-        """Reverse of the id(child) string handed off by a tab's DragSource
-        in _create_tab_label — finds the actual content widget by scanning
-        all panes. The id is only ever resolved while the drag that produced
-        it is still in flight, and the widget stays alive (still parented in
-        its source notebook) for that whole time, so id() collisions aren't
-        a concern here."""
-        for nb in self.pane_notebooks:
-            for i in range(nb.get_n_pages()):
-                child = nb.get_nth_page(i)
-                if str(id(child)) == tab_id:
-                    return child
-        return None
-
-    def _find_pane_by_tab_label(self, tab_label_box):
-        """Which pane owns the tab whose label widget is tab_label_box, and
-        that tab's content widget. Needed because a tab label's gestures
-        (right-click menu, scroll-to-switch) don't know which of the up to 4
-        notebooks they currently live in — tabs can move between panes."""
-        for nb in self.pane_notebooks:
-            for i in range(nb.get_n_pages()):
-                child = nb.get_nth_page(i)
-                if nb.get_tab_label(child) == tab_label_box:
-                    return nb, child
-        return None, None
 
     def _get_region_options(self):
         """The (key, label) pane regions selectable for the current split
@@ -1323,60 +1145,62 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             ]
         return []
 
-    def _pane_region_label(self, notebook):
-        """Maps a pane notebook to its region key under the current split
+    def _pane_region_label(self, tabview):
+        """Maps a pane's TabView to its region key under the current split
         mode (see _get_region_options). None if there's nothing to filter."""
-        if notebook is None or self.split_mode is None:
+        if tabview is None or self.split_mode is None:
             return None
-        p0, p1, p2, p3 = self.pane_notebooks
+        p0, p1, p2, p3 = self.pane_tabviews
         if self.split_mode == "vertical":
-            return {p0: "left", p1: "right"}.get(notebook)
+            return {p0: "left", p1: "right"}.get(tabview)
         elif self.split_mode == "horizontal":
-            return {p0: "top", p1: "bottom"}.get(notebook)
+            return {p0: "top", p1: "bottom"}.get(tabview)
         elif self.split_mode == "grid":
-            return {p0: "top-left", p1: "top-right", p2: "bottom-left", p3: "bottom-right"}.get(notebook)
+            return {p0: "top-left", p1: "top-right", p2: "bottom-left", p3: "bottom-right"}.get(tabview)
         return None
 
     def _move_all_tabs(self, src, dest):
-        """Moves every page from src to dest, preserving the same page and
-        tab-label widgets (so terminals/SFTP connections/tab_data stay valid)."""
+        """Moves every page from src to dest via Adw.TabView's own
+        transfer_page — works for same-window TabView-to-TabView moves
+        just as well as the cross-window case it's built for."""
         if src is dest:
             return
         while src.get_n_pages() > 0:
-            child = src.get_nth_page(0)
-            tab_label = src.get_tab_label(child)
-            src.remove_page(0)
-            dest.append_page(child, tab_label)
-            self._mark_tab_draggable(dest, child)
+            page = src.get_nth_page(0)
+            src.transfer_page(page, dest, dest.get_n_pages())
         if self.active_pane is src:
             self._set_active_pane(dest)
 
-    def _detach_pane(self, notebook):
-        """Unparents a pane notebook from whatever Paned (or, in
-        single-pane/no-split mode, self.terminal_overlay) currently holds
-        it, so it can be reparented into a freshly-built layout tree."""
-        parent = notebook.get_parent()
+    def _unparent_pane_box(self, box):
+        """Unparents a pane's box (tab bar + tabview column) from whatever
+        Paned (or, in single-pane/no-split mode, self.terminal_overlay)
+        currently holds it, so it can be reparented into a freshly-built
+        layout tree. Renamed from the old _detach_pane to avoid confusion
+        with the unrelated tab-DETACH-to-new-window feature (see
+        TerminalPaneWindow.detach_tab_page)."""
+        parent = box.get_parent()
         if parent is None:
             return
         if isinstance(parent, Gtk.Paned):
-            if parent.get_start_child() is notebook:
+            if parent.get_start_child() is box:
                 parent.set_start_child(None)
-            elif parent.get_end_child() is notebook:
+            elif parent.get_end_child() is box:
                 parent.set_end_child(None)
         elif isinstance(parent, Gtk.Overlay):
-            if parent.get_child() is notebook:
+            if parent.get_child() is box:
                 parent.set_child(None)
 
     def _build_pane_layout_widget(self, mode):
         """Builds the widget tree for the tab area for a given split mode.
-        Always rebuilds from scratch (cheap: at most 4 notebooks + 3 Paned) —
-        simpler and less bug-prone than patching an existing Paned tree."""
-        p0, p1, p2, p3 = self.pane_notebooks
-        for nb in self.pane_notebooks:
-            self._detach_pane(nb)
+        Always rebuilds from scratch (cheap: at most 4 pane boxes + 3
+        Paned) — simpler and less bug-prone than patching an existing
+        Paned tree."""
+        b0, b1, b2, b3 = self._pane_boxes
+        for box in self._pane_boxes:
+            self._unparent_pane_box(box)
 
         if mode is None:
-            return p0
+            return b0
 
         def make_paned(orientation, start, end):
             paned = Gtk.Paned(orientation=orientation, wide_handle=True, vexpand=True, hexpand=True)
@@ -1408,15 +1232,15 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             return paned
 
         if mode == "vertical":  # side-by-side (left/right)
-            return make_paned(Gtk.Orientation.HORIZONTAL, p0, p1)
+            return make_paned(Gtk.Orientation.HORIZONTAL, b0, b1)
         elif mode == "horizontal":  # stacked (top/bottom)
-            return make_paned(Gtk.Orientation.VERTICAL, p0, p1)
+            return make_paned(Gtk.Orientation.VERTICAL, b0, b1)
         elif mode == "grid":  # 2x2
-            left_col = make_paned(Gtk.Orientation.VERTICAL, p0, p2)
-            right_col = make_paned(Gtk.Orientation.VERTICAL, p1, p3)
+            left_col = make_paned(Gtk.Orientation.VERTICAL, b0, b2)
+            right_col = make_paned(Gtk.Orientation.VERTICAL, b1, b3)
             return make_paned(Gtk.Orientation.HORIZONTAL, left_col, right_col)
 
-        return p0
+        return b0
 
     def _apply_pane_layout(self):
         new_root = self._build_pane_layout_widget(self.split_mode)
@@ -1448,12 +1272,12 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         - single/2-way -> grid: nothing to move, new panes start empty.
         """
         if self.split_mode == target_mode:
-            p0, p1, p2, p3 = self.pane_notebooks
+            p0, p1, p2, p3 = self.pane_tabviews
             for nb in (p1, p2, p3):
                 self._move_all_tabs(nb, p0)
             self.split_mode = None
         else:
-            p0, p1, p2, p3 = self.pane_notebooks
+            p0, p1, p2, p3 = self.pane_tabviews
             if self.split_mode == "grid":
                 if target_mode == "vertical":
                     self._move_all_tabs(p2, p0)
@@ -2668,7 +2492,7 @@ class ThongSSHWindow(Adw.ApplicationWindow):
     def update_menu_sensitivity(self, *args):
         """Updates menu item sensitivity based on the current state."""
         # "Close Tab"
-        can_close_tab = any(nb.get_n_pages() > 0 for nb in self.pane_notebooks)
+        can_close_tab = any(tv.get_n_pages() > 0 for tv in self.pane_tabviews)
         self.lookup_action("close-tab").set_enabled(can_close_tab)
 
         # "Edit" and "Delete"
@@ -2686,7 +2510,16 @@ class ThongSSHWindow(Adw.ApplicationWindow):
     def setup_actions_and_popovers(self):
         """Creates GActions and Gtk.PopoverMenu for right-click. 100% GTK4."""
 
-        # 1. Create GActions (actions)
+        # Window-scoped terminal-pane actions (win.close-tab, copy/paste-
+        # clipboard, send-file, find-in-terminal, save-log-tab) + the
+        # terminal right-click popover + this window's own tab_menu_model/
+        # tab_copy_host_menu (native Adw.TabView tab-strip context menu,
+        # app-scoped — see app.py) + the in-terminal find bar. Shared with
+        # DetachedTabWindow — see tab_window_base.py.
+        self._setup_terminal_pane_actions()
+
+        # 1. Create GActions (actions) — host-tree / Quickies-panel scoped,
+        # all window-local (win.*).
 
         action_connect = Gio.SimpleAction.new("connect", None)
         action_connect.connect("activate", self.on_menu_connect_host)
@@ -2708,8 +2541,13 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         action_clone.connect("activate", self.on_menu_clone_host)
         self.add_action(action_clone)
 
+        # Host-tree-only — the tab context menu's own "Connect SFTP" is the
+        # app-scoped app.open-sftp (see app.py / TerminalPaneWindow.
+        # open_sftp_for_tab_page), unrelated to this action despite the
+        # near-identical name; a menu inside a DetachedTabWindow can't
+        # reach a win.* action registered only on the main window.
         action_open_sftp = Gio.SimpleAction.new("open-sftp", None)
-        action_open_sftp.connect("activate", self.on_menu_open_sftp)
+        action_open_sftp.connect("activate", self.on_menu_open_sftp_from_tree)
         self.add_action(action_open_sftp)
 
         action_rename = Gio.SimpleAction.new("rename", None)
@@ -2720,64 +2558,25 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         action_delete.connect("activate", self.on_remove_selected_clicked)
         self.add_action(action_delete)
 
-        action_copy = Gio.SimpleAction.new("copy-clipboard", None)
-        action_copy.connect("activate", self.on_menu_copy)
-        self.add_action(action_copy)
-
-        action_paste = Gio.SimpleAction.new("paste-clipboard", None)
-        action_paste.connect("activate", self.on_menu_paste)
-        self.add_action(action_paste)
-
-        action_send_file = Gio.SimpleAction.new("send-file", None)
-        action_send_file.connect("activate", self.on_menu_send_file)
-        self.add_action(action_send_file)
-
-        action_find_in_terminal = Gio.SimpleAction.new("find-in-terminal", None)
-        action_find_in_terminal.connect("activate", self.on_menu_find_in_terminal)
-        self.add_action(action_find_in_terminal)
-
-        # Stateful (checkbox) action — see on_terminal_right_click for how its
-        # state/enabled are kept in sync with the right-clicked tab.
-        action_save_log_tab = Gio.SimpleAction.new_stateful("save-log-tab", None, GLib.Variant.new_boolean(False))
-        action_save_log_tab.connect("activate", self.on_menu_toggle_log_tab)
-        self.add_action(action_save_log_tab)
-
         action_user_cmd = Gio.SimpleAction.new_stateful("user-command", GLib.VariantType.new('s'), GLib.Variant.new_string(""))
         action_user_cmd.connect("activate", self.on_menu_user_command)
         self.add_action(action_user_cmd)
 
-        # Shared between the host-tree AND tab context menus (same idiom
-        # as "open-sftp" above) — the handler picks the right host config
-        # via _get_target_host_config(). 3 separate actions, not 1
-        # parametrized one, deliberately: a GSimpleAction's "enabled" is
-        # per action name, not per (action, parameter) pair, and
-        # "user@hostname" needs to grey out independently of the other two
-        # when the target host has no username (see on_tree_right_click/
-        # on_tab_right_click).
+        # Host-tree-only (same reasoning as "open-sftp" above) — the tab
+        # menu's own Copy to Clipboard is the app-scoped app.copy-host-*
+        # (see app.py / TerminalPaneWindow.copy_host_field_for_tab_page).
+        # 3 separate actions, not 1 parametrized one, deliberately: a
+        # GSimpleAction's "enabled" is per action name, not per (action,
+        # parameter) pair, and "user@hostname" needs to grey out
+        # independently of the other two when the target host has no
+        # username (see on_tree_right_click).
         for field in ("name", "address", "userhost"):
             action = Gio.SimpleAction.new(f"copy-host-{field}", None)
             action.connect("activate", self.on_menu_copy_host_field, field)
             self.add_action(action)
 
-        # ✨ Action to open SSH from an SFTP tab
-        action_open_ssh = Gio.SimpleAction.new("open-ssh-from-tab", None)
-        action_open_ssh.connect("activate", self.on_menu_open_ssh_from_tab)
-        self.add_action(action_open_ssh)
-        action_tab_disconnect = Gio.SimpleAction.new("tab-disconnect", None)
-        action_tab_disconnect.connect("activate", self.on_menu_tab_disconnect)
-        self.add_action(action_tab_disconnect)
-
-        action_tab_reconnect = Gio.SimpleAction.new("tab-reconnect", None)
-        action_tab_reconnect.connect("activate", self.on_menu_tab_reconnect)
-        self.add_action(action_tab_reconnect)
-
-        action_tab_duplicate = Gio.SimpleAction.new("tab-duplicate", None)
-        action_tab_duplicate.connect("activate", self.on_menu_tab_duplicate)
-        self.add_action(action_tab_duplicate)
-
         # Quicky row context menu — acts on self.last_clicked_quicky_index
-        # (see on_quicky_right_click), same "shared popover + last-clicked"
-        # idiom as the tab context menu above.
+        # (see on_quicky_right_click).
         action_quicky_insert = Gio.SimpleAction.new("quicky-insert", None)
         action_quicky_insert.connect("activate", self.on_menu_quicky_insert)
         self.add_action(action_quicky_insert)
@@ -2808,20 +2607,10 @@ class ThongSSHWindow(Adw.ApplicationWindow):
 
         self.last_clicked_quicky_index = None
 
-        # 2. Create GMenu (models)
+        # 2. Create GMenu (models) — host-tree / Quickies-panel only. The
+        # tab-strip's own context menu (tab_menu_model/tab_copy_host_menu)
+        # was already built by _setup_terminal_pane_actions above.
 
-        # Shared between the host-tree and tab menus below — a single
-        # Gio.MenuModel instance can be attached as a submenu in more than
-        # one place. Its 3 item labels are rewritten per right-click (see
-        # _populate_copy_host_menu) to show the actual host's values
-        # instead of a generic title — but always exactly 3 items,
-        # deliberately never grown/shrunk per host (e.g. by hiding
-        # "user@hostname" when no user is set — that's disabled instead,
-        # in on_tree_right_click/on_tab_right_click): see
-        # build_user_commands_menu's docstring for why a GtkPopoverMenu's
-        # item *count* changing between two consecutive popups is what
-        # causes a truncated first show, not what its labels say or what
-        # the click handler enables/disables.
         self.copy_host_menu = Gio.Menu()
         self._populate_copy_host_menu(None)
 
@@ -2841,21 +2630,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         group_menu.append(_("Rename..."), "win.rename")
         group_menu.append(_("Delete"), "win.delete")
 
-        terminal_menu = Gio.Menu()
-        terminal_menu.append(_("Copy"), "win.copy-clipboard")
-        terminal_menu.append(_("Paste"), "win.paste-clipboard")
-        terminal_menu.append(_("Send File..."), "win.send-file")
-        terminal_menu.append(_("Find... (Ctrl+Shift+F)"), "win.find-in-terminal")
-        terminal_menu.append(_("Save log"), "win.save-log-tab")
-
-        tab_menu = Gio.Menu()
-        tab_menu.append(_("Disconnect"), "win.tab-disconnect")
-        tab_menu.append(_("Reconnect"), "win.tab-reconnect")
-        tab_menu.append(_("Duplicate"), "win.tab-duplicate")
-        tab_menu.append(_("Connect SFTP"), "win.open-sftp") # Re-use existing action
-        tab_menu.append(_("Connect SSH"), "win.open-ssh-from-tab")
-        tab_menu.append_submenu(_("Copy to Clipboard"), self.copy_host_menu)
-
         quicky_menu = Gio.Menu()
         quicky_menu.append(_("Insert into Terminal"), "win.quicky-insert")
         quicky_menu.append(_("Run"), "win.quicky-run")
@@ -2868,15 +2642,10 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         # 3. Create Popover (widgets)
         self.popover_host = Gtk.PopoverMenu.new_from_model(host_menu)
         self.popover_group = Gtk.PopoverMenu.new_from_model(group_menu)
-        self.popover_terminal = Gtk.PopoverMenu.new_from_model(terminal_menu)
-        self.popover_tab = Gtk.PopoverMenu.new_from_model(tab_menu)
         self.popover_quicky = Gtk.PopoverMenu.new_from_model(quicky_menu)
         self.popover_host.set_parent(self) # Set parent once to the main window
-        self.popover_terminal.connect("closed", self.on_popover_terminal_closed)
-        self.popover_tab.set_parent(self)
         self.popover_quicky.set_parent(self)
         self.popover_group.set_parent(self) # Set parent once to the main window
-        self.popover_terminal.set_parent(self) # Attach to the main window
 
         # Built once here — not lazily on the host tree's first right-click
         # (see on_tree_right_click's history) — so the section's one-time
@@ -2887,15 +2656,10 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         # this again whenever the user commands list itself changes.
         self.build_user_commands_menu()
 
-        self._build_find_window()
-
     def on_tree_right_click(self, gesture, n_press, x, y):
         """Right-click handler: Shows PopoverMenu (100% GTK4).
         Connected to 'released' so the button is already up when the popover
         opens — prevents the release event from activating the first menu item."""
-        # Clear stale tab context so SFTP/terminal actions use the tree selection,
-        # not whatever tab was last right-clicked.
-        self.last_clicked_tab = None
         tree_view = gesture.get_widget()
         path_info = tree_view.get_path_at_pos(int(x), int(y))
 
@@ -2996,356 +2760,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
             # Execute the command in the background
             GLib.spawn_async(shlex.split(command_to_run), flags=GLib.SpawnFlags.SEARCH_PATH)
 
-    def on_terminal_right_click(self, gesture, n_press, x, y):
-        """Right-click handler for Vte.Terminal. Connected to 'released'."""
-        terminal = gesture.get_widget()
-
-        self.lookup_action("copy-clipboard").set_enabled(terminal.get_has_selection())
-        self.lookup_action("paste-clipboard").set_enabled(True)
-
-        # "Send File" only makes sense for SSH sessions (SFTP under the hood) —
-        # telnet has no equivalent file-transfer sub-protocol.
-        page_widget = self._find_tab_widget_for(terminal)
-        tab_info = self.tab_data.get(page_widget)
-        can_send_file = (
-            tab_info is not None
-            and tab_info.get("type") == "terminal"
-            and tab_info.get("config", {}).get("protocol", "ssh") == "ssh"
-        )
-        self.lookup_action("send-file").set_enabled(can_send_file)
-
-        is_logging = tab_info is not None and tab_info.get("log_path") is not None
-        save_log_action = self.lookup_action("save-log-tab")
-        save_log_action.set_state(GLib.Variant.new_boolean(is_logging))
-        save_log_action.set_enabled(tab_info is not None)
-
-        translated_x, translated_y = terminal.translate_coordinates(self, x, y)
-
-        rect = Gdk.Rectangle()
-        rect.x = int(translated_x)
-        rect.y = int(translated_y)
-        rect.width, rect.height = 1, 1
-
-        self.popover_terminal.set_pointing_to(rect)
-        self.popover_terminal.popup()
-
-    def on_menu_copy(self, action, param):
-        """Copies selected text from the active terminal."""
-        terminal = self.get_active_terminal()
-        if terminal:
-            terminal.copy_clipboard_format(Vte.Format.TEXT)
-
-    def on_menu_paste(self, action, param):
-        """Pastes text from the clipboard into the active terminal."""
-        terminal = self.get_active_terminal()
-        if terminal:
-            terminal.paste_clipboard()
-
-    def on_menu_send_file(self, action, param):
-        """Opens the Send File dialog for the active terminal's remote host."""
-        terminal = self.get_active_terminal()
-        page_widget = self.get_active_terminal_widget()
-        if terminal is None or page_widget is None:
-            return
-        tab_info = self.tab_data.get(page_widget)
-        if not tab_info or tab_info.get("type") != "terminal":
-            return
-        host_config = tab_info["config"]
-        initial_dir = guess_remote_cwd(terminal)
-        dialog = SendFileDialog(self, host_config, initial_dir, terminal=terminal)
-        dialog.present()
-
-    # --- In-terminal Find ---
-
-    def _build_find_window(self):
-        """Builds the (single, reused) in-terminal find bar as an overlay
-        pinned to the top-right of the terminal area, just under the header
-        bar — not a separate window. GTK4 gives clients no way to place a
-        top-level window at a specific spot (Wayland treats placement as
-        purely the compositor's call — see _restore_window_geometry's note
-        on the same limitation for the main window itself), so a real
-        window could never reliably land "top-right, under the header bar"
-        the way this needs to; a Gtk.Overlay child, by contrast, is just
-        anchored via halign/valign and paints above whatever's beneath it.
-        It's overlaid on self.terminal_overlay, the one Gtk.Overlay every
-        split layout (none/vertical/horizontal/grid) renders inside of
-        (see _apply_pane_layout), so its position is unaffected by which
-        split mode is active. Non-modal by construction (it's just a widget
-        in the same window, not a dialog) — no focus is ever stolen from
-        the terminal, and it stays open across tab/pane switches (see
-        _sync_find_target_terminal) until closed by hand or reopened.
-        Vte.Terminal owns the actual search state (compiled regex,
-        wrap-around) so nothing here is per-tab; _find_target_terminal just
-        tracks which terminal it's currently acting on."""
-        self.find_bar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.find_bar.add_css_class("card")
-        self.find_bar.set_margin_top(8)
-        self.find_bar.set_margin_end(8)
-        self.find_bar.set_halign(Gtk.Align.END)
-        self.find_bar.set_valign(Gtk.Align.START)
-        self.find_bar.set_visible(False)
-        self._find_target_terminal = None
-
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.set_margin_top(8)
-        box.set_margin_bottom(8)
-        box.set_margin_start(10)
-        box.set_margin_end(10)
-        self.find_bar.append(box)
-
-        entry_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self.find_entry = Gtk.SearchEntry()
-        self.find_entry.set_hexpand(True)
-        self.find_entry.set_width_chars(24)
-        entry_row.append(self.find_entry)
-
-        self.find_prev_button = Gtk.Button(icon_name="go-up-symbolic")
-        self.find_prev_button.set_tooltip_text(_("Previous match"))
-        self.find_next_button = Gtk.Button(icon_name="go-down-symbolic")
-        self.find_next_button.set_tooltip_text(_("Next match"))
-        close_button = Gtk.Button(icon_name="window-close-symbolic")
-        close_button.add_css_class("flat")
-        close_button.set_tooltip_text(_("Close"))
-        close_button.connect("clicked", lambda b: self.find_bar.set_visible(False))
-        entry_row.append(self.find_prev_button)
-        entry_row.append(self.find_next_button)
-        entry_row.append(close_button)
-        box.append(entry_row)
-
-        options_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self.find_case_toggle = Gtk.CheckButton(label=_("Case sensitive"))
-        self.find_regex_toggle = Gtk.CheckButton(label=_("Regular expression"))
-        self.find_wrap_toggle = Gtk.ToggleButton(icon_name="view-refresh-symbolic")
-        self.find_wrap_toggle.set_tooltip_text(_("Wrap around"))
-        self.find_wrap_toggle.set_active(True)
-        options_row.append(self.find_case_toggle)
-        options_row.append(self.find_regex_toggle)
-        options_row.append(self.find_wrap_toggle)
-
-        self.find_status_label = Gtk.Label(label="")
-        self.find_status_label.add_css_class("dim-label")
-        self.find_status_label.set_hexpand(True)
-        self.find_status_label.set_halign(Gtk.Align.END)
-        options_row.append(self.find_status_label)
-        box.append(options_row)
-
-        self.find_entry.connect("search-changed", self._on_find_text_changed)
-        self.find_entry.connect("activate", lambda e: self._find_next())
-        self.find_prev_button.connect("clicked", lambda b: self._find_previous())
-        self.find_next_button.connect("clicked", lambda b: self._find_next())
-        self.find_case_toggle.connect("toggled", lambda b: self._on_find_text_changed(self.find_entry))
-        self.find_regex_toggle.connect("toggled", lambda b: self._on_find_text_changed(self.find_entry))
-        self.find_wrap_toggle.connect("toggled", lambda b: self._apply_find_wrap_option())
-
-        self.terminal_overlay.add_overlay(self.find_bar)
-
-    def on_menu_find_in_terminal(self, action, param):
-        """Shows (or re-focuses, if already shown) the find bar targeting
-        the active terminal. Bound to the terminal context menu's
-        "Find..." item and to Ctrl+Shift+F."""
-        terminal = self.get_active_terminal()
-        if terminal is None:
-            return
-        self._find_target_terminal = terminal
-        # Re-apply whatever's already in the entry to *this* terminal — the
-        # bar is shared across terminals, so if it's reopened with leftover
-        # text from a previous tab, that terminal has never had a regex set
-        # on it yet.
-        self._on_find_text_changed(self.find_entry)
-
-        self.find_bar.set_visible(True)
-        self.find_entry.grab_focus()
-        self.find_entry.select_region(0, -1)
-
-    def _sync_find_target_terminal(self):
-        """Keeps the find bar's target in sync with whichever terminal is
-        currently active. Needed because the find bar no longer hides
-        itself when you switch tabs/panes (see _build_find_window) —
-        without this it would keep silently searching whatever terminal was
-        active when it was opened, no matter where you'd since navigated
-        to. A no-op while the bar is hidden; on_menu_find_in_terminal
-        already re-resolves the active terminal fresh the next time it's
-        shown."""
-        if not hasattr(self, "find_bar") or not self.find_bar.get_visible():
-            return
-        terminal = self.get_active_terminal()
-        if terminal is None or terminal is self._find_target_terminal:
-            return
-        self._find_target_terminal = terminal
-        self._on_find_text_changed(self.find_entry)
-
-    def _apply_find_wrap_option(self):
-        if self._find_target_terminal is not None:
-            self._find_target_terminal.search_set_wrap_around(self.find_wrap_toggle.get_active())
-
-    def _compile_find_regex(self, pattern):
-        """Returns a compiled Vte.Regex for pattern, or False if it's an
-        invalid regex (only possible when the regex toggle is on — literal
-        text can't fail to compile once escaped).
-
-        Vte.Regex.new_for_search requires the PCRE2_MULTILINE bit to be set
-        or Vte refuses the regex outright (confirmed via a runtime check in
-        vte_terminal_search_set_regex) — easy to miss since it's not
-        documented in the Python bindings. Plain-text (non-regex) search
-        escapes the pattern rather than using PCRE2_LITERAL, since that flag
-        can't be combined with Vte.REGEX_FLAGS_DEFAULT's other option bits."""
-        is_regex = self.find_regex_toggle.get_active()
-        text = pattern if is_regex else GLib.regex_escape_string(pattern, -1)
-        flags = Vte.REGEX_FLAGS_DEFAULT | _PCRE2_MULTILINE
-        if not self.find_case_toggle.get_active():
-            flags |= _PCRE2_CASELESS
-        try:
-            return Vte.Regex.new_for_search(text, -1, flags)
-        except GLib.GError:
-            return False
-
-    def _on_find_text_changed(self, entry):
-        terminal = self._find_target_terminal
-        if terminal is None:
-            return
-
-        pattern = self.find_entry.get_text()
-        if not pattern:
-            terminal.search_set_regex(None, 0)
-            self.find_entry.remove_css_class("error")
-            self.find_status_label.set_text("")
-            return
-
-        regex = self._compile_find_regex(pattern)
-        if regex is False:
-            self.find_entry.add_css_class("error")
-            self.find_status_label.set_text(_("Invalid pattern"))
-            terminal.search_set_regex(None, 0)
-            return
-
-        self.find_entry.remove_css_class("error")
-        terminal.search_set_regex(regex, 0)
-        self._apply_find_wrap_option()
-        # search_find_next() resumes *after* the end of whatever's currently
-        # selected — so as the pattern grows (still matching the same spot),
-        # it skips right past that match instead of re-checking it, and the
-        # highlight creeps forward one match per keystroke. Clearing the
-        # selection first makes every keystroke re-search from the top, so
-        # it lands back on the same (nearest) match instead of marching on.
-        terminal.unselect_all()
-        found = terminal.search_find_next()
-        self.find_status_label.set_text("" if found else _("Not found"))
-
-    def _find_next(self):
-        terminal = self._find_target_terminal
-        if terminal is None or not self.find_entry.get_text():
-            return
-        found = terminal.search_find_next()
-        self.find_status_label.set_text("" if found else _("Not found"))
-
-    def _find_previous(self):
-        terminal = self._find_target_terminal
-        if terminal is None or not self.find_entry.get_text():
-            return
-        found = terminal.search_find_previous()
-        self.find_status_label.set_text("" if found else _("Not found"))
-
-    # --- Session logging ("Save session log" on a host, or "Save log" from
-    # an open tab's right-click menu) ---
-    #
-    # Both entry points use the same mechanism: snapshot the terminal's
-    # current rendered buffer as the log's starting content, then poll every
-    # 500ms and append whatever's new. This logs VTE's own rendered plain
-    # text rather than the raw PTY byte stream, which is deliberate — an
-    # earlier version wrapped the spawned command with `script` for a
-    # byte-perfect transcript, but that turned out to be a poor fit twice
-    # over: (1) the raw stream is full of the shell/prompt's own escape
-    # sequences (colors, cursor moves for autosuggestions, etc.), which read
-    # as unreadable garbage rather than the plain "user@host> command" text
-    # a log is actually useful for; and (2) `script` fully buffers its
-    # output and only writes it out at the child process's exit — for a
-    # long-lived interactive SSH session, the log file would just sit empty
-    # for the entire session and only appear once you disconnected.
-    #
-    # The trade-off of polling VTE's buffer instead: it's not byte-for-byte
-    # lossless, since VTE's scrollback is bounded — a burst of output
-    # between two polls that pushes the *whole* diff out of scrollback
-    # before the next poll would be missed. That's a rare edge case for
-    # interactive use, and far better than an unreadable or perpetually
-    # empty log.
-    #
-    # Full-screen TUI apps (vim, mc, tmux, htop, less, ...) hit that same
-    # "diff isn't a clean append" path on essentially every keystroke —
-    # they redraw the same screen region in place rather than printing new
-    # lines at the bottom, so the new dump doesn't start with the old one
-    # even though nothing scrolled away. Left alone, that means a full
-    # screen dump logged every ~500ms for as long as the app has focus.
-    # There's no public VTE API for "is the alternate screen active right
-    # now" to detect this directly, so terminal.log_skip_interactive_screens
-    # (on by default — see _tick_session_log) uses the symptom itself: two
-    # non-append diffs in a row is treated as "we're inside a redrawing
-    # TUI app", and further screens are skipped until a real appended diff
-    # (the app exited, back to a normal scrolling shell) shows up again.
-
-    def on_menu_toggle_log_tab(self, action, param):
-        """Activates the terminal context menu's "Save log" checkbox item —
-        starts logging if it wasn't running, stops (and closes out the log
-        file) if it was."""
-        page_widget = self.get_active_terminal_widget()
-        if page_widget is None:
-            return
-        tab_info = self.tab_data.get(page_widget)
-        if tab_info is None:
-            return
-        if tab_info.get("log_path") is not None:
-            self._stop_session_logging(page_widget)
-            tab_info["log_path"] = None
-        else:
-            self._start_session_logging(page_widget)
-        action.set_state(GLib.Variant.new_boolean(tab_info.get("log_path") is not None))
-
-    def _start_session_logging(self, page_widget):
-        tab_info = self.tab_data.get(page_widget)
-        if tab_info is None or tab_info.get("log_path") is not None:
-            return  # already logging, or not a real tab
-        terminal, _pid = self.open_sessions.get(page_widget, (None, None))
-        if terminal is None:
-            return
-
-        config = tab_info.get("config", {})
-        log_path = self._compute_log_path(config.get("host"), config.get("name"))
-        try:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            initial_text = self._dump_terminal_text(terminal)
-            log_file = open(log_path, "w", encoding="utf-8")
-            log_file.write(initial_text)
-            log_file.flush()
-        except (OSError, GLib.GError) as e:
-            logging.error(f"Failed to start session log at {log_path}: {e}")
-            return
-
-        tab_info["log_path"] = log_path
-        tab_info["_log_file"] = log_file
-        tab_info["_log_last_text"] = initial_text
-        # Reset every time logging (re)starts — see the "Full-screen TUI
-        # apps" comment above and _tick_session_log below.
-        tab_info["_log_redraw_streak"] = 0
-        tab_info["_log_suspended"] = False
-        tab_info["_log_timeout_id"] = GLib.timeout_add(500, self._tick_session_log, page_widget)
-
-    def _dump_terminal_text(self, terminal):
-        """Current full buffer (scrollback + screen) as plain rendered text
-        (no escape sequences), with trailing blank lines stripped.
-
-        The strip matters for the tick-to-tick diffing in _tick_session_log:
-        VTE's dump always includes the cursor's current (often still-blank)
-        row, whose position shifts down as more output arrives. Left in,
-        that makes the previous dump a non-prefix of the next one purely
-        because of where the blank tail happened to fall — not because
-        anything was actually rewritten — which broke the append-only diff.
-        Stripping it keeps the comparison anchored to actual printed content
-        instead of a moving blank tail."""
-        stream = Gio.MemoryOutputStream.new_resizable()
-        terminal.write_contents_sync(stream, Vte.WriteFlags.DEFAULT)
-        stream.close(None)  # steal_as_bytes() asserts the stream is closed first
-        text = bytes(stream.steal_as_bytes().get_data()).decode("utf-8", errors="replace")
-        return text.rstrip("\n")
-
     def get_terminal_context_snippet(self):
         """Read-only helper for the AI panel's "attach context" button:
         the active terminal's current selection if there is one, otherwise
@@ -3358,215 +2772,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         if terminal.get_has_selection():
             return terminal.get_text_selected(Vte.Format.TEXT)
         return "\n".join(self._dump_terminal_text(terminal).splitlines()[-20:])
-
-    def _tick_session_log(self, page_widget):
-        """Recurring GLib.timeout_add callback — returning False cancels it,
-        which doubles as automatic cleanup once the tab closes (tab_data
-        stops having an entry for it, or logging was otherwise stopped)."""
-        tab_info = self.tab_data.get(page_widget)
-        if tab_info is None or tab_info.get("log_path") is None:
-            return False
-        terminal, _pid = self.open_sessions.get(page_widget, (None, None))
-        if terminal is None:
-            return False
-
-        try:
-            current_text = self._dump_terminal_text(terminal)
-        except GLib.GError as e:
-            logging.debug(f"Session log poll failed, will retry: {e}")
-            return True
-
-        last_text = tab_info.get("_log_last_text", "")
-        if current_text == last_text:
-            return True
-
-        is_append = current_text.startswith(last_text)
-        log_file = tab_info.get("_log_file")
-
-        if not is_append and self.settings_manager.get("terminal.log_skip_interactive_screens"):
-            # Two non-append diffs in a row -> treat this as a full-screen
-            # TUI app redrawing in place (see the comment above this
-            # section), not a one-off scrollback-overflow burst, and stop
-            # logging its screens until a real appended diff shows up
-            # again. The first occurrence alone isn't enough to tell the
-            # two apart, so it still falls through to the normal
-            # "older output lost" handling below.
-            streak = tab_info.get("_log_redraw_streak", 0) + 1
-            tab_info["_log_redraw_streak"] = streak
-            if streak >= 2:
-                if not tab_info.get("_log_suspended") and log_file:
-                    tab_info["_log_suspended"] = True
-                    log_file.write("\n--- (interactive screen redraws not logged — "
-                                    "see Settings → Terminal → Logging) ---\n")
-                    log_file.flush()
-                tab_info["_log_last_text"] = current_text
-                return True
-        else:
-            tab_info["_log_redraw_streak"] = 0
-            if tab_info.get("_log_suspended"):
-                tab_info["_log_suspended"] = False
-                if log_file:
-                    log_file.write("--- (resuming log) ---\n")
-
-        if is_append:
-            new_part = current_text[len(last_text):]
-        else:
-            # The common-prefix invariant broke — scrollback evicted
-            # content before we got a chance to log it. Can't recover
-            # the gap, so just note it and carry on from here.
-            new_part = "\n--- (older output lost; scrollback limit reached) ---\n" + current_text
-        if log_file and new_part:
-            log_file.write(new_part)
-            log_file.flush()
-        tab_info["_log_last_text"] = current_text
-        return True
-
-    def _stop_session_logging(self, page_widget):
-        """Closes out any active log bookkeeping for page_widget. Safe to
-        call even if none was active. Does NOT touch tab_info["log_path"]
-        itself — callers that mean to fully clear logging state (as opposed
-        to e.g. replacing it on reconnect) should set that separately."""
-        tab_info = self.tab_data.get(page_widget)
-        if tab_info is None:
-            return
-        timeout_id = tab_info.pop("_log_timeout_id", None)
-        if timeout_id is not None:
-            GLib.source_remove(timeout_id)
-
-    def _dir_short_label(self, path):
-        """"~" for $HOME, otherwise just the last path component — the
-        display form used for "local: <dir>" tab names (see
-        _on_new_local_terminal_clicked / _tick_local_cwd)."""
-        home = os.environ.get("HOME", os.path.expanduser("~"))
-        return "~" if path == home else (os.path.basename(path.rstrip("/")) or path)
-
-    def _get_process_cwd(self, pid):
-        """Cross-platform "what directory is this process currently in".
-        Linux gets this for free via /proc/<pid>/cwd. macOS and the BSDs
-        have no /proc, so they fall back to a tool that already ships
-        with the OS itself: lsof on macOS (and any BSD that happens to
-        have it), procstat(1) on FreeBSD's base system. Returns None if
-        the cwd genuinely can't be determined (missing tool, permissions,
-        ...) — distinct from "process is gone", which callers check
-        separately."""
-        try:
-            return os.readlink(f"/proc/{pid}/cwd")
-        except OSError:
-            pass
-
-        def _via_lsof():
-            try:
-                result = subprocess.run(
-                    ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
-                    capture_output=True, text=True, timeout=2,
-                )
-            except (OSError, subprocess.SubprocessError):
-                return None
-            for line in result.stdout.splitlines():
-                if line.startswith("n"):
-                    return line[1:]
-            return None
-
-        def _via_procstat():
-            try:
-                result = subprocess.run(
-                    ["procstat", "-f", str(pid)],
-                    capture_output=True, text=True, timeout=2,
-                )
-            except (OSError, subprocess.SubprocessError):
-                return None
-            for line in result.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 4 and parts[2] == "cwd":
-                    return parts[-1]
-            return None
-
-        if platform.system() == "Darwin":
-            return _via_lsof()
-        if shutil.which("procstat"):
-            return _via_procstat()
-        if shutil.which("lsof"):
-            return _via_lsof()
-        return None
-
-    def _start_local_cwd_tracking(self, page_widget):
-        """Keeps a local-terminal tab's title (and, if the watermark
-        template references $name, its watermark too — see _tick_local_cwd)
-        live-updated to its shell's actual current directory ("local: ~",
-        "local: .config", ...) by polling the shell process's cwd once a
-        second (see _get_process_cwd). Local-protocol tabs only: an
-        ssh/telnet tab's pid is the local ssh client, whose own cwd never
-        reflects anything happening on the remote session. VTE/OSC-7 based
-        tracking would need the connecting shell's rc files to opt in
-        (most don't, by default); reading the process's cwd directly
-        needs nothing from the shell at all.
-        Stops and restarts cleanly on reconnect (see _continue_session) so
-        there's never more than one timer running per tab."""
-        self._stop_local_cwd_tracking(page_widget)
-        tab_info = self.tab_data.get(page_widget)
-        if tab_info is None:
-            return
-        tab_info["_cwd_last"] = None
-        tab_info["_cwd_timeout_id"] = GLib.timeout_add_seconds(1, self._tick_local_cwd, page_widget)
-
-    def _tick_local_cwd(self, page_widget):
-        """Recurring GLib.timeout_add_seconds callback — returning False
-        cancels it, doubling as cleanup once the tab closes, its shell
-        process dies, or its cwd simply can't be determined on this
-        platform (no point polling forever for an answer that will never
-        come)."""
-        tab_info = self.tab_data.get(page_widget)
-        if tab_info is None:
-            return False
-        session = self.open_sessions.get(page_widget)
-        if session is None:
-            return False
-        _terminal, pid = session
-        cwd = self._get_process_cwd(pid)
-        if cwd is None:
-            try:
-                os.kill(pid, 0)
-            except OSError:
-                return False  # process is gone
-            return False  # process alive, but cwd unavailable — nothing will change
-
-        if cwd != tab_info.get("_cwd_last"):
-            tab_info["_cwd_last"] = cwd
-            new_name = f"local: {self._dir_short_label(cwd)}"
-            tab_label = tab_info.get("tab_label")
-            if tab_label is not None:
-                tab_label.set_text(new_name)
-            # Keep config["name"] in sync too — it's what $name in the
-            # watermark template (and any Quicky/command template) actually
-            # reads, and it was otherwise frozen at whatever directory the
-            # tab started in, never reflecting a `cd` afterwards.
-            tab_info["config"]["name"] = new_name
-            self._update_watermark_for_tab(page_widget)
-        return True
-
-    def _stop_local_cwd_tracking(self, page_widget):
-        """Safe to call even if no tracking was active."""
-        tab_info = self.tab_data.get(page_widget)
-        if tab_info is None:
-            return
-        timeout_id = tab_info.pop("_cwd_timeout_id", None)
-        if timeout_id is not None:
-            GLib.source_remove(timeout_id)
-        log_file = tab_info.pop("_log_file", None)
-        if log_file:
-            try:
-                log_file.write("\n")
-                log_file.close()
-            except OSError:
-                pass
-        tab_info.pop("_log_last_text", None)
-
-    def on_popover_terminal_closed(self, popover):
-        """Gives focus back to the active terminal when the context menu is closed."""
-        def refocus():
-            terminal = self.get_active_terminal()
-            if terminal: terminal.grab_focus()
-        GLib.idle_add(refocus)
 
     def _prepare_command(self, command_template, host_config):
         """Replaces placeholders in a command template with values from host_config."""
@@ -3591,57 +2796,23 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         return command_template
     # --- ---
 
-    def on_menu_open_sftp(self, action, param):
-        """Handles the 'Open sftp connection' action."""
-        # ✨ Check if we're being called from a tab context menu
-        host_config = None
-        if self.last_clicked_tab and self.last_clicked_tab in self.tab_data:
-            # Get config from the clicked tab
-            host_config = self.tab_data[self.last_clicked_tab]["config"]
-            logging.info(f"Opening SFTP for tab: {host_config['name']}")
-        else:
-            # Get config from tree selection
-            selection = self.tree_view.get_selection()
-            model, tree_iter = selection.get_selected()
-            if not tree_iter: return
-            host_config = model.get_value(tree_iter, COL_DATA)
-            logging.info(f"Opening SFTP stub for: {host_config['name']}")
-
-        # Create the new SFTP widget
-        sftp_view = SftpWidget(host_config)
-
-        # Create a tab label with a close button
-        tab_label_box, close_btn, _tab_label = self._create_tab_label("folder-remote-symbolic", host_config['name'])
-
-        # Add the new widget to the active pane
-        target_notebook = self._get_active_notebook()
-        page_num = target_notebook.append_page(sftp_view, tab_label_box)
-        self._mark_tab_draggable(target_notebook, sftp_view)
-        target_notebook.set_current_page(page_num)
-        sftp_view.grab_focus()
-
-        # Connect the close button to a simple tab-closing lambda
-        close_btn.connect("clicked", lambda btn: self.close_tab(sftp_view))
-        self.tab_data[sftp_view] = {"type": "sftp", "config": host_config}
-
-
+    def on_menu_open_sftp_from_tree(self, action, param):
+        """win.open-sftp — the host tree's "Connect SFTP" item only. The
+        tab context menu's own "Connect SFTP" is the app-scoped
+        app.open-sftp (see app.py / TerminalPaneWindow.open_sftp_for_tab_page)
+        — a menu inside a DetachedTabWindow could never reach a win.*
+        action registered only on the main window, which is why these are
+        no longer the same action (they used to be, keyed off
+        self.last_clicked_tab, before detachable tabs)."""
+        selection = self.tree_view.get_selection()
+        model, tree_iter = selection.get_selected()
+        if not tree_iter:
+            return
+        host_config = model.get_value(tree_iter, COL_DATA)
+        logging.info(f"Opening SFTP stub for: {host_config['name']}")
+        self._open_sftp_tab(host_config)
 
     # --- Handlers for the global menu ---
-    def on_menu_close_tab(self, action, param):
-        """Closes the active tab in the active pane."""
-        notebook = self._get_active_notebook()
-        current_page_idx = notebook.get_current_page()
-        if current_page_idx < 0: return
-
-        page_widget = notebook.get_nth_page(current_page_idx)
-        if not page_widget: return
-
-        # ✨ Check if it's a terminal tab (has a PID)
-        if page_widget in self.open_sessions:
-            terminal, pid = self.open_sessions[page_widget]
-            self.on_tab_close_button_clicked(None, page_widget, pid)
-        else: # It's an SFTP tab or something else without a process
-            self.close_tab(page_widget)
 
     def on_menu_edit_rename(self, action, param):
         """Calls 'Edit' or 'Rename' depending on the node type."""
@@ -3914,55 +3085,13 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         dialog.connect("response", on_response)
         dialog.present()
 
-    def get_active_terminal(self):
-        """Returns the active Vte.Terminal widget or None."""
-        current_page_widget = self.get_active_terminal_widget()
-        # The tab's root widget (currently a Gtk.Overlay — see
-        # _continue_session) is the key in self.open_sessions/tab_data.
-        if current_page_widget and current_page_widget in self.open_sessions:
-            terminal, pid = self.open_sessions[current_page_widget]
-            return terminal
-        return None
-
-    def get_active_terminal_widget(self):
-        """Returns the tab's root container widget for the active tab in
-        the active pane — whatever's actually keyed in open_sessions/
-        tab_data (currently a Gtk.Overlay wrapping a Gtk.ScrolledWindow for
-        terminal tabs; other tab types may use something else entirely)."""
-        notebook = self._get_active_notebook()
-        if notebook.get_n_pages() > 0:
-            return notebook.get_nth_page(notebook.get_current_page())
-        return None
-
-    def _find_tab_widget_for(self, widget):
-        """Walks up from any descendant widget (a Vte.Terminal, its
-        watermark label, anything living inside a tab's own content) to
-        the actual tab_data/open_sessions key — the tab's root widget —
-        without hardcoding how many wrapper layers sit in between. More
-        robust than a fixed-depth get_parent()/typed get_ancestor() call,
-        which breaks again the next time that wrapping changes (as
-        get_parent() already did once, when the watermark's Gtk.Overlay
-        was added between the terminal and its tab root)."""
-        node = widget
-        while node is not None:
-            if node in self.tab_data:
-                return node
-            node = node.get_parent()
-        return None
-
-    def _get_target_tab_widget(self):
-        """The tab a context-menu action should act on: the one that was
-        right-clicked, or the currently active one if none was."""
-        return self.last_clicked_tab if self.last_clicked_tab else self.get_active_terminal_widget()
-
     def _get_target_host_config(self):
-        """The host config a context-menu action should read from — same
-        shared-action idiom as on_menu_open_sftp: the right-clicked tab's
-        config if this came from the tab menu (last_clicked_tab is set),
-        else whatever's selected in the host tree (last_clicked_tab is
-        cleared by on_tree_right_click before that menu ever opens)."""
-        if self.last_clicked_tab and self.last_clicked_tab in self.tab_data:
-            return self.tab_data[self.last_clicked_tab].get("config")
+        """The host config the tree's own context-menu actions
+        (win.copy-host-*) should read from — whatever's currently selected
+        in the host tree. (Before detachable tabs, this also handled the
+        tab-menu case via self.last_clicked_tab; that's now the app-scoped
+        app.copy-host-* / TerminalPaneWindow.copy_host_field_for_tab_page
+        instead — see app.py.)"""
         selection = self.tree_view.get_selection()
         model, tree_iter = selection.get_selected()
         if tree_iter:
@@ -3970,15 +3099,18 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         return None
 
     def _populate_copy_host_menu(self, host_config):
-        """Rewrites the "Copy to Clipboard" submenu's 3 item labels to the
-        given host's actual values, in place of a generic title — called
-        from on_tree_right_click/on_tab_right_click with whatever host is
-        about to be right-clicked (host_config=None gives a safe generic
-        fallback, used only for the one-time initial build before any
-        real host has ever been clicked). Item count never changes — see
-        this menu's own creation comment in setup_actions_and_popovers for
-        why that specifically (not label text) is what a GtkPopoverMenu
-        can't re-measure in time for its very next popup."""
+        """Rewrites the tree's "Copy to Clipboard" submenu's 3 item labels
+        to the given host's actual values, in place of a generic title —
+        called from on_tree_right_click with whatever host is about to be
+        right-clicked (host_config=None gives a safe generic fallback,
+        used only for the one-time initial build before any real host has
+        ever been clicked). Tree-only — see
+        TerminalPaneWindow._populate_tab_copy_host_menu for the tab
+        context menu's own (app-scoped) equivalent. Item count never
+        changes — see this menu's own creation comment in
+        setup_actions_and_popovers for why that specifically (not label
+        text) is what a GtkPopoverMenu can't re-measure in time for its
+        very next popup."""
         self.copy_host_menu.remove_all()
         host_str = (host_config or {}).get("host") or ""
         name = (host_config or {}).get("name") or ""
@@ -4031,98 +3163,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
 
     # --- 6. Connection Logic (Terminal) ---
 
-    def _compute_log_path(self, host_str, name):
-        """Where a new session log should be written — directory per the
-        client.log_dir -> .config_path -> CONFIG_DIR/logs fallback chain
-        (see paths.resolve_log_dir), filename "user@NAME-YYYYMMDD-hh:mm:ss"
-        where NAME is the host's config name (the tree's friendly label),
-        not its hostname/IP — the username comes off of host_str (the
-        already-resolved "[user@]hostname" string, with any
-        interactively-prompted username merged in) since that's the only
-        place it lives."""
-        log_dir = resolve_log_dir(self.settings_manager.get("client.log_dir"))
-        if host_str and "@" in host_str:
-            username, _sep, _hostname = host_str.partition("@")
-            label = f"{username}@{name}" if name else username
-        else:
-            label = name or host_str or "session"
-        label = label.replace("/", "_")
-        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H:%M:%S")
-        return log_dir / f"{label}-{timestamp}"
-
-    def start_session(self, config, existing_terminal_widget=None):
-        """Starts a terminal session based on the host config (SSH, Telnet, or local)."""
-        if config.get("protocol") == "local":
-            self._continue_session(config, None, existing_terminal_widget)
-            return
-
-        host_str = config.get('host')
-        if not host_str:
-            logging.warning("Error: host is not set in the config.")
-            return
-
-        # Reconnecting (not opening fresh) to a tab whose session already
-        # ended (see on_ssh_process_exited/terminal.close_on_disconnect) —
-        # normally config['host'] already has a resolved "user@host" baked
-        # in by now (see _continue_session) and this would skip straight
-        # to reusing it forever. terminal.reconnect_prompt_username opts
-        # into re-asking here too, same as the very first connection.
-        is_reconnect_to_dead_session = (
-            existing_terminal_widget is not None
-            and self.tab_data.get(existing_terminal_widget, {}).get("disconnected", False)
-        )
-        ask_username_again = (
-            is_reconnect_to_dead_session
-            and self.settings_manager.get("terminal.reconnect_prompt_username")
-        )
-
-        # Only ask for a username if it's an SSH connection and either no
-        # user is specified yet, or the reconnect setting above asks again.
-        if config.get("protocol", "ssh") == "ssh" and ("@" not in host_str or ask_username_again):
-            prev_user, _sep, bare_host = host_str.rpartition('@')
-            dialog = InputDialog(
-                self,
-                title=_("Username Required"),
-                message=_("Enter username for {host_str}").format(host_str=bare_host),
-                default_text=prev_user,
-            )
-            # Run asynchronously to not block the UI
-            dialog.run_async(lambda username: self._continue_session(config, username, existing_terminal_widget))
-        else:
-            self._continue_session(config, None, existing_terminal_widget)
-
-    def _apply_color_scheme_to_terminal(self, terminal, scheme_key=None):
-        """Applies a color scheme (or the currently-configured one) to a
-        single Vte.Terminal. "default"/an unresolved custom scheme both
-        mean "no override" — explicitly reset to VTE's own built-in colors
-        rather than silently leaving whatever the terminal already had."""
-        if scheme_key is None:
-            scheme_key = self.settings_manager.get("terminal.color_scheme")
-        colors = get_scheme_colors(scheme_key)
-        if not colors:
-            terminal.set_colors(None, None, None)
-            return
-
-        def parse_color(spec):
-            rgba = Gdk.RGBA()
-            rgba.parse(spec)
-            return rgba
-
-        terminal.set_colors(
-            foreground=parse_color(colors["foreground"]),
-            background=parse_color(colors["background"]),
-            palette=[parse_color(c) for c in colors["palette"]],
-        )
-
-    def apply_terminal_color_scheme_to_all(self):
-        """Re-applies the current color scheme to every already-open
-        terminal — called right after Settings are applied, so a change
-        takes effect immediately instead of only affecting the next new
-        tab."""
-        scheme_key = self.settings_manager.get("terminal.color_scheme")
-        for terminal, _pid in self.open_sessions.values():
-            self._apply_color_scheme_to_terminal(terminal, scheme_key)
-
     def on_watermark_toggle_clicked(self, button):
         # "clicked", not "toggled" — button is a plain Adw.SplitButton
         # (momentary click, no on/off state of its own; see its creation
@@ -4134,114 +3174,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         set_split_button_active_style(button, new_state)
         self.apply_watermark_settings_to_all()
 
-    def _render_template_text(self, template, host_config):
-        """Same $name/$host/$user substitution as _prepare_command, minus
-        its shlex.quote — used for plain text (watermark labels, inserted
-        Quickies), never a shell command line."""
-        if not template:
-            return ""
-        host_str = host_config.get("host") or ""  # see _prepare_command's comment — "host" can be present-but-null
-        user, _sep, host = host_str.rpartition('@')
-        for placeholder, value in {"$name": host_config.get("name", "") or "", "$host": host, "$user": user}.items():
-            template = template.replace(placeholder, value)
-        return template
-
-    def _update_watermark_for_tab(self, scrolled_term):
-        """Refreshes one terminal tab's watermark label — text, position,
-        styling, and visibility — from current settings."""
-        tab_info = self.tab_data.get(scrolled_term)
-        if not tab_info or tab_info.get("type") != "terminal":
-            return
-        label = tab_info.get("watermark_label")
-        if label is None:
-            return
-
-        if not self.settings_manager.get("interface.watermark_enabled"):
-            label.set_visible(False)
-            return
-
-        if self.settings_manager.get("interface.watermark_scope") == "active" \
-                and scrolled_term is not self.get_active_terminal_widget():
-            label.set_visible(False)
-            return
-
-        text = self._render_template_text(
-            self.settings_manager.get("interface.watermark_text"), tab_info["config"]
-        )
-        if not text:
-            label.set_visible(False)
-            return
-
-        halign, valign = _WATERMARK_ALIGN.get(
-            self.settings_manager.get("interface.watermark_position"), (Gtk.Align.CENTER, Gtk.Align.CENTER)
-        )
-        label.set_halign(halign)
-        label.set_valign(valign)
-        label.set_margin_start(12)
-        label.set_margin_end(12)
-        label.set_margin_top(12)
-        label.set_margin_bottom(12)
-
-        font_size = self.settings_manager.get("interface.watermark_font_size")
-        shrink_percent = self.settings_manager.get("interface.watermark_shrink_percent") or 100
-        if shrink_percent < 100 and self.split_mode is not None:
-            font_size = max(1, int(font_size * shrink_percent / 100))
-
-        color, opacity = self._resolve_watermark_color_and_opacity(text)
-
-        rgba = Gdk.RGBA()
-        rgba.parse(color)
-        attrs = Pango.AttrList()
-        attrs.insert(Pango.attr_size_new(font_size * Pango.SCALE))
-        font_family = self.settings_manager.get("interface.watermark_font_family")
-        if font_family:
-            attrs.insert(Pango.attr_family_new(font_family))
-        attrs.insert(Pango.attr_foreground_new(
-            int(rgba.red * 65535), int(rgba.green * 65535), int(rgba.blue * 65535)
-        ))
-        label.set_attributes(attrs)
-        label.set_text(text)
-        label.set_opacity(opacity / 100)
-        label.set_visible(True)
-
-    def _resolve_watermark_color_and_opacity(self, text):
-        """Adaptive watermarks: interface.watermark_rules is an ORDERED
-        list of {"pattern", "color", "opacity"} — the first (topmost) rule
-        whose regex matches the rendered watermark text wins, overriding
-        the global watermark_color/watermark_opacity. E.g. a rule matching
-        "root" ranked above one matching "arbe" means "root@arbe-svc053"
-        (which matches both) still comes out red, not blue — priority is
-        purely list order, not specificity. No match (or no rules at all)
-        falls back to the plain global settings, same as before this
-        feature existed. Malformed regex in a rule is skipped silently
-        rather than breaking every watermark in the app."""
-        for rule in self.settings_manager.get("interface.watermark_rules") or []:
-            pattern = rule.get("pattern")
-            if not pattern:
-                continue
-            try:
-                if re.search(pattern, text):
-                    return rule.get("color") or self.settings_manager.get("interface.watermark_color"), \
-                        rule.get("opacity") or self.settings_manager.get("interface.watermark_opacity")
-            except re.error:
-                continue
-        return self.settings_manager.get("interface.watermark_color"), self.settings_manager.get("interface.watermark_opacity")
-
-    def apply_watermark_settings_to_all(self):
-        """Mirrors apply_terminal_color_scheme_to_all above — re-applies
-        watermark settings to every open tab immediately, whether it's the
-        toggle button, a Settings change, or the active pane/tab/split
-        layout changing which tab(s) should show one."""
-        # Keeps the header-bar popover's own grid in sync with whatever
-        # last changed the setting — Settings' on_apply, in particular,
-        # would otherwise leave it showing a stale position until the app
-        # restarted. A no-op (no signal refires) when it's already
-        # showing the current position, e.g. when this call was itself
-        # triggered by that same grid via _on_watermark_position_changed.
-        self.watermark_position_grid.set_selected(self.settings_manager.get("interface.watermark_position"))
-        for scrolled_term in list(self.open_sessions.keys()):
-            self._update_watermark_for_tab(scrolled_term)
-
     def _on_watermark_position_changed(self, position_id):
         """PositionGrid.connect_changed callback for the header-bar
         popover's own grid (see its creation, next to watermark_toggle_
@@ -4249,464 +3181,6 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         self.settings_manager.set("interface.watermark_position", position_id)
         self.settings_manager.save()
         self.apply_watermark_settings_to_all()
-
-    def _continue_session(self, config, username_from_prompt, existing_terminal_widget=None):
-        """Second part of the logic, called AFTER getting the username."""
-
-        protocol = config.get("protocol", "ssh")
-
-        # If "Cancel" was pressed in the dialog for an SSH connection that needs a username
-        if protocol == "ssh" and username_from_prompt is None and "@" not in config.get('host'):
-            logging.info("Connection canceled (no username provided).")
-            # Ensure we destroy the dialog if it's still around
-            return
-
-        host_str = config.get('host')
-        if username_from_prompt:
-            # rpartition, not a plain prepend — config['host'] may already
-            # be "olduser@host" (a reconnect re-prompting per
-            # terminal.reconnect_prompt_username, see start_session), and
-            # prepending onto that unconditionally would produce
-            # "newuser@olduser@host" instead of replacing it.
-            _old_user, _sep, bare_host = host_str.rpartition('@')
-            host_str = f"{username_from_prompt}@{bare_host}"
-
-        # Captured before the telnet branch below strips the user@ part back
-        # off — this is what actually gets used to auth this session, so
-        # it's what tab_data should remember (e.g. for "Send File" later),
-        # not the original config which may have had no username at all.
-        resolved_host_str = host_str
-
-        cmd = []
-        password = None
-        # Only set for the sshpass branch below (SSHPASS env var, "-e") —
-        # every other case spawns with an unmodified environment.
-        extra_env = {}
-
-        if protocol == "ssh":
-            # Check for a password in the keyring
-            password = self.keyring.load_password(config.get("name"))
-
-            # Build the SSH command
-            if password and "@" in host_str:
-                # Use sshpass if a password is set. "-e" (read the
-                # password from the SSHPASS env var), not "-p <password>"
-                # — an argv element is visible to any local user for the
-                # whole life of the process via `ps aux`/`/proc/<pid>/
-                # cmdline`; SSHPASS itself is still readable via
-                # /proc/<pid>/environ, but that's a deliberate, targeted
-                # read by someone with the same access level as reading
-                # this process's own memory, not a passive `ps aux` glance.
-                # The actual env var is set below, alongside the rest of
-                # the spawned process's environment (see spawn_sync's envv).
-                sshpass_path = self.settings_manager.get("client.sshpass_path")
-                cmd = [sshpass_path, "-e", self.settings_manager.get("client.ssh_path")]
-                # StrictHostKeyChecking=no + UserKnownHostsFile=/dev/null
-                # used to be added here "because sshpass can't handle host
-                # key prompts" — but that's only true for a HOST KEY
-                # CHANGE/unknown-host confirmation prompt, which sshpass
-                # was never asked to answer anyway (it only intercepts the
-                # password prompt); a *known* host authenticates with no
-                # such prompt at all. Dropping both: an already-known host
-                # works exactly the same, and a genuinely new/changed host
-                # key now correctly stops and asks — in this same
-                # interactive terminal, since VTE's own pty is what's
-                # actually connected here — instead of silently accepting
-                # it, which is exactly the case that should ask.
-                extra_env["SSHPASS"] = password
-                logging.info("Password found in keyring, using sshpass.")
-            else:
-                # Standard SSH command
-                cmd = [self.settings_manager.get("client.ssh_path")]
-            
-            if config.get('port'):
-                cmd.extend(["-p", str(config['port'])])
-            if config.get('key_path'):
-                cmd.extend(["-i", config['key_path']])
-            if config.get('forward_x', False):
-                cmd.append("-X")
-            if config.get('forward_agent', False):
-                cmd.append("-A")
-            if config.get('compat_old_systems', False):
-                logging.debug("Compatibility mode enabled (old ciphers)")
-                cmd.extend([
-                   "-o", "KexAlgorithms=+diffie-hellman-group1-sha1",
-                    "-o", "Ciphers=+aes128-cbc,3des-cbc",
-                ])
-                # ✨ Add HostKeyAlgorithms and PubkeyAcceptedKeyTypes for old systems
-                cmd.extend(["-o", "HostKeyAlgorithms=+ssh-rsa", "-o", "PubkeyAcceptedKeyTypes=+ssh-rsa"])
-            if config.get('ssh_options'):
-                try:
-                    extra_opts = shlex.split(config['ssh_options'])
-                    cmd.extend(extra_opts)
-                except Exception as e:
-                    logging.warning(f"Error parsing extra options: {e}")
-
-            cmd.append(host_str)
-
-        elif protocol == "telnet":
-            # Build the Telnet command
-            cmd = [self.settings_manager.get("client.telnet_path")]
-            # Telnet usually takes host and port as separate arguments
-            if "@" in host_str:
-                host_str = host_str.split("@", 1)[1] # Telnet doesn't use user@host format
-            cmd.append(host_str)
-            if config.get('port'):
-                cmd.append(str(config['port']))
-
-        elif protocol == "local":
-            # No remote host at all — just the user's own login shell.
-            cmd = [os.environ.get("SHELL", "/bin/bash")]
-
-        else:
-            logging.error(f"Unknown protocol: {protocol}")
-            return
-
-        logging.debug(f"Assembled command: {' '.join(cmd)}")
-
-        # ✨ Log command to file in config directory
-        # No password-masking needed here: sshpass now gets the password
-        # via "-e"/the SSHPASS env var (see above), never as a "cmd" argv
-        # element, so there's nothing sensitive in "cmd" to mask.
-        try:
-            log_file_path = CONFIG_DIR / "session_commands.log"
-            with open(log_file_path, "a", encoding="utf-8") as f:
-                timestamp = datetime.datetime.now().isoformat()
-                f.write(f"[{timestamp}] {' '.join(cmd)}\n")
-        except Exception as e:
-            logging.error(f"Failed to write to command log file: {e}")
-
-        # --- 6.3. Terminal Launch ---
-        try:
-            # If we are reconnecting, reuse the existing terminal. Otherwise, create a new one.
-            if existing_terminal_widget and existing_terminal_widget in self.open_sessions:
-                terminal, old_pid = self.open_sessions[existing_terminal_widget]
-                logging.debug(f"Reusing existing terminal widget. Old PID: {old_pid}")
-            else:
-                terminal = Vte.Terminal()
-            
-            scrollback = self.settings_manager.get("terminal.scrollback_lines")
-            font_str = self.settings_manager.get("terminal.font")
-
-            terminal.set_scrollback_lines(scrollback)
-            terminal.set_font(Pango.FontDescription.from_string(font_str))
-            self._apply_color_scheme_to_terminal(terminal)
-
-            # THONGSSH_RUNNING_FROM_APPIMAGE is only ever set by our own
-            # build-appimage.sh's AppRun — absent for every other way this
-            # app runs, so the wrapped-cmd branch is a guaranteed no-op
-            # outside the AppImage; everything below it is the exact,
-            # untouched original behavior for every other way this app
-            # runs (a git checkout, .deb/.rpm install, macOS .app, ...).
-            if os.environ.get("THONGSSH_RUNNING_FROM_APPIMAGE"):
-                # Handles restoring the AppImage-polluted vars AND
-                # exporting extra_env (SSHPASS) itself, via a real shell
-                # unset/export — see its own docstring for why envv isn't
-                # used for either purpose here.
-                cmd = _wrap_cmd_for_appimage_env(cmd, extra_env)
-                envv = []
-            else:
-                # An empty envv here (the common case — extra_env is only
-                # ever populated for the sshpass/SSHPASS case above) makes
-                # VTE spawn with an unmodified inherited environment, same
-                # as before; confirmed live (TERM/PATH/HOME all still
-                # present) rather than assumed, since passing a NON-empty
-                # envv fully *replaces* the child's environment instead of
-                # extending it — so the sshpass case has to build the full
-                # list itself, not just the one extra SSHPASS var.
-                envv = [f"{k}={v}" for k, v in os.environ.items()] if extra_env else []
-                for key, value in extra_env.items():
-                    envv.append(f"{key}={value}")
-
-            success, pid = terminal.spawn_sync(
-                Vte.PtyFlags.DEFAULT,
-                config.get('cwd') or os.environ['HOME'],
-                cmd, envv, GLib.SpawnFlags.DEFAULT, # Use DEFAULT instead of DO_NOT_REAP_CHILD
-                None, None
-            )
-
-            if not success:
-                logging.error(f"Error: failed to spawn VTE. Command: {' '.join(cmd)}")
-                dialog = Adw.MessageDialog(
-                    transient_for=self,
-                    heading=_("VTE Spawn Error"),
-                    body=_("Failed to start the terminal. Check the command and permissions.\n\nCommand: {cmd_str}").format(cmd_str=' '.join(cmd)),
-                )
-                dialog.add_response("ok", _("OK"))
-                dialog.present()
-                return
-
-            logging.debug(f"SSH process started with PID: {pid}")
-
-            # If this is a new session, create all the widgets.
-            if not existing_terminal_widget:
-                terminal.set_vexpand(True)
-                terminal.set_hexpand(True)
-
-                right_click_gesture = Gtk.GestureClick.new()
-                right_click_gesture.set_button(Gdk.BUTTON_SECONDARY)
-                right_click_gesture.connect("pressed", self._on_right_press_guard)
-                right_click_gesture.connect("released", self.on_terminal_right_click)
-                terminal.add_controller(right_click_gesture)
-
-                key_controller_terminal = Gtk.EventControllerKey.new()
-                key_controller_terminal.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-                key_controller_terminal.connect("key-pressed", self.on_terminal_key_pressed)
-                terminal.add_controller(key_controller_terminal)
-
-                scroll_controller = Gtk.EventControllerScroll.new(flags=Gtk.EventControllerScrollFlags.VERTICAL)
-                scroll_controller.connect("scroll", self.on_terminal_scroll)
-                terminal.add_controller(scroll_controller)
-
-                scrolled_term = Gtk.ScrolledWindow()
-                # ✨ This ensures the terminal gets the correct size allocation
-                scrolled_term.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-                # Direct child, not wrapped in the Overlay below — Vte.Terminal
-                # implements Gtk.Scrollable, which is what lets a
-                # Gtk.ScrolledWindow delegate straight to its own scroll
-                # adjustments and show a real scrollbar. Putting the Overlay
-                # in between used to make the ScrolledWindow's actual child a
-                # plain (non-Scrollable) container, so GTK4 silently fell
-                # back to auto-wrapping it in a Gtk.Viewport instead — that
-                # scrolls the *Overlay's own natural size*, not the
-                # terminal's real scrollback, which is why the scrollbar
-                # itself disappeared even though the terminal's own
-                # keyboard-driven scrolling (Shift+PageUp, etc.) kept working.
-                scrolled_term.set_child(terminal)
-
-                # The watermark label sits in its own Gtk.Overlay *above* the
-                # ScrolledWindow — not inside it — so it stays fixed in the
-                # viewport instead of scrolling away with the terminal's own
-                # content. can_target(False) makes it click-through: pointer
-                # events fall straight through to the terminal underneath.
-                watermark_label = Gtk.Label()
-                watermark_label.set_can_target(False)
-                watermark_label.add_css_class("terminal-watermark")
-                term_overlay = Gtk.Overlay()
-                term_overlay.set_child(scrolled_term)
-                term_overlay.add_overlay(watermark_label)
-
-                tab_label_box, close_btn, tab_label = self._create_tab_label("utilities-terminal-symbolic", config['name'])
-
-                # term_overlay (not scrolled_term) is the actual tab/page
-                # widget from here on — the one keyed in open_sessions/
-                # tab_data and handed to the notebook.
-                target_notebook = self._get_active_notebook()
-                page_num = target_notebook.append_page(term_overlay, tab_label_box)
-                self._mark_tab_draggable(target_notebook, term_overlay)
-                target_notebook.set_current_page(page_num)
-                terminal.grab_focus()
-
-                resolved_config = dict(config)
-                resolved_config['host'] = resolved_host_str
-
-                self.open_sessions[term_overlay] = (terminal, pid)
-                self.tab_data[term_overlay] = {
-                    "type": "terminal", "config": resolved_config, "log_path": None,
-                    "watermark_label": watermark_label, "tab_label": tab_label,
-                    "disconnected": False,
-                }
-                close_btn.connect("clicked", self.on_tab_close_button_clicked, term_overlay, pid)
-                terminal.connect("child-exited", self.on_ssh_process_exited, term_overlay)
-                # Per-host "save_log" (set on the host's own edit page) wins
-                # when present; terminal.auto_save_log covers everything
-                # else — including the "local" entry and "+"-button tabs,
-                # which have no per-host page of their own to carry it.
-                if config.get("save_log", False) or self.settings_manager.get("terminal.auto_save_log"):
-                    self._start_session_logging(term_overlay)
-                if protocol == "local":
-                    self._start_local_cwd_tracking(term_overlay)
-                self.apply_watermark_settings_to_all()
-            else: # This is a reconnect, just update the PID
-                self.open_sessions[existing_terminal_widget] = (terminal, pid)
-                self._stop_session_logging(existing_terminal_widget)
-                tab_info = self.tab_data.get(existing_terminal_widget)
-                if tab_info is not None:
-                    tab_info["log_path"] = None
-                    tab_info["config"]["host"] = resolved_host_str
-                    # Alive again — clear the disconnected strikethrough
-                    # applied in on_ssh_process_exited, if any.
-                    tab_info["disconnected"] = False
-                    self._set_tab_label_disconnected(tab_info.get("tab_label"), False)
-                # Per-host "save_log" (set on the host's own edit page) wins
-                # when present; terminal.auto_save_log covers everything
-                # else — including the "local" entry and "+"-button tabs,
-                # which have no per-host page of their own to carry it.
-                if config.get("save_log", False) or self.settings_manager.get("terminal.auto_save_log"):
-                    self._start_session_logging(existing_terminal_widget)
-                if protocol == "local":
-                    self._start_local_cwd_tracking(existing_terminal_widget)
-                terminal.grab_focus()
-                self.apply_watermark_settings_to_all()
-
-        except Exception as e:
-            logging.critical(f"Critical error spawning VTE: {e}")
-            dialog = Adw.MessageDialog(
-                transient_for=self,
-                heading=_("SSH Launch Error"),
-                body=_("Failed to start the process. Make sure /usr/bin/ssh exists.\n\nError: {error}").format(error=e),
-            )
-            dialog.add_response("ok", _("OK"))
-            dialog.present()
-
-    def _create_tab_label(self, icon_name, label_text):
-        """Creates a standard tab label box with icon, text, close button, and context menu."""
-        # Tight spacing/margins here plus the "tab"/"thongssh-tab-close" CSS
-        # rules in setup_css() are what make tabs compact — a full-size flat
-        # button and the theme's own generous tab padding otherwise add up
-        # fast once there are enough tabs to scroll.
-        tab_label_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        icon = Gtk.Image.new_from_icon_name(icon_name) # No change here, this is correct
-        tab_label = Gtk.Label(label=label_text)
-        tab_label_box.append(icon)
-        tab_label_box.append(tab_label)
-
-        close_btn = Gtk.Button.new_from_icon_name("window-close-symbolic")
-        close_btn.add_css_class("flat")
-        close_btn.add_css_class("thongssh-tab-close")
-        tab_label_box.append(close_btn)
-
-        right_click_gesture = Gtk.GestureClick.new()
-        right_click_gesture.set_button(Gdk.BUTTON_SECONDARY)
-        right_click_gesture.connect("pressed", self._on_right_press_guard)
-        right_click_gesture.connect("released", self.on_tab_right_click)
-        tab_label_box.add_controller(right_click_gesture)
-
-        # ✨ Mouse wheel over the tab label switches tabs. Attached here (not on
-        # the whole Notebook) so scrolling over page content — an SFTP log, a
-        # file list, anything — never gets mistaken for a tab-switch gesture.
-        tab_scroll_controller = Gtk.EventControllerScroll.new(flags=Gtk.EventControllerScrollFlags.VERTICAL)
-        tab_scroll_controller.connect("scroll", self.on_notebook_scroll_switch)
-        tab_label_box.add_controller(tab_scroll_controller)
-
-        # Lets this tab be dragged into a different pane (see the DropTarget
-        # in _create_pane_notebook for why this hands off a plain string
-        # instead of relying on Gtk.Notebook's own tab-detachable). Attached
-        # once here, at tab-label creation time, rather than in
-        # _mark_tab_draggable — that gets re-invoked every time a tab moves
-        # to a new pane, which would otherwise pile up duplicate DragSources
-        # on the same label.
-        drag_source = Gtk.DragSource.new()
-        drag_source.set_actions(Gdk.DragAction.MOVE)
-        def on_drag_prepare(source, x, y, box=tab_label_box):
-            _pane, child = self._find_pane_by_tab_label(box)
-            if child is None:
-                return None
-            return Gdk.ContentProvider.new_for_value(str(id(child)))
-        drag_source.connect("prepare", on_drag_prepare)
-        # Without an explicit icon, GDK falls back to rendering the drag
-        # payload itself as text — since that payload is the tab's
-        # str(id(child)) string (see on_drag_prepare above), the user was
-        # seeing that numeric id instead of the tab's name/icon while
-        # dragging. Showing a snapshot of the actual label fixes that.
-        def on_drag_begin(source, drag, box=tab_label_box):
-            source.set_icon(Gtk.WidgetPaintable.new(box), 0, 0)
-        drag_source.connect("drag-begin", on_drag_begin)
-        tab_label_box.add_controller(drag_source)
-
-        return tab_label_box, close_btn, tab_label
-
-    def on_tab_right_click(self, gesture, n_press, x, y):
-        """Shows the context menu for a notebook tab. Connected to 'released'."""
-        tab_label_box = gesture.get_widget()
-
-        _owner_pane, page_widget = self._find_pane_by_tab_label(tab_label_box)
-
-        # ✨ Store the clicked tab so the context menu knows which tab to act on.
-        if page_widget:
-            self.last_clicked_tab = page_widget
-            # Do NOT switch to the tab, just show the menu for it.
-        
-        sftp_action = self.lookup_action("open-sftp")
-        ssh_action = self.lookup_action("open-ssh-from-tab") # For sftp -> terminal
-
-        if page_widget and page_widget in self.tab_data:
-            tab_info = self.tab_data[page_widget]
-            is_sftp = tab_info["type"] == "sftp"
-            host_config = tab_info.get("config", {})
-            # The local-machine tab has no remote host to open an SFTP
-            # connection to, or any of Server name/Hostname/IP/user@host
-            # to copy — same reasoning as on_tree_right_click excluding
-            # the tree's own synthetic "local" row from the host menu.
-            is_local = host_config.get("protocol") == "local"
-            sftp_action.set_enabled(not is_sftp and not is_local)
-            ssh_action.set_enabled(is_sftp)
-            has_user = "@" in (host_config.get("host") or "")
-            self.lookup_action("copy-host-name").set_enabled(not is_local)
-            self.lookup_action("copy-host-address").set_enabled(not is_local)
-            self.lookup_action("copy-host-userhost").set_enabled(not is_local and has_user)
-            self._populate_copy_host_menu(None if is_local else host_config)
-        else:
-            sftp_action.set_enabled(False)
-            ssh_action.set_enabled(False)
-            self.lookup_action("copy-host-name").set_enabled(False)
-            self.lookup_action("copy-host-address").set_enabled(False)
-            self.lookup_action("copy-host-userhost").set_enabled(False)
-            self._populate_copy_host_menu(None)
-
-        translated_x, translated_y = tab_label_box.translate_coordinates(self, x, y)
-
-        rect = Gdk.Rectangle()
-        rect.x, rect.y, rect.width, rect.height = int(translated_x), int(translated_y), 1, 1
-        self.popover_tab.set_pointing_to(rect)
-        self.popover_tab.popup()
-
-    def _resolve_latin_letter(self, keyval, keycode):
-        """The Latin a-z letter for this physical key, even when a non-Latin
-        layout (Cyrillic, etc.) is the active one.
-
-        Ctrl+<letter> combos — both our own shortcuts below and, more
-        importantly, the raw control characters a shell/readline expects
-        (Ctrl+C, Ctrl+D for EOF/logout, Ctrl+Z, ...) — are conventionally
-        about the physical key, not whatever character the active keyboard
-        layout happens to map it to. If the current keyval already is a
-        Latin letter this is a no-op either way; if it isn't (e.g. the
-        active layout produced a Cyrillic letter), this asks GDK for every
-        other keyval this same physical key produces across all configured
-        layouts/levels and returns the first Latin one it finds."""
-        if Gdk.KEY_a <= keyval <= Gdk.KEY_z:
-            return chr(keyval)
-        if Gdk.KEY_A <= keyval <= Gdk.KEY_Z:
-            return chr(keyval).lower()
-
-        display = self.get_display()
-        if display is None:
-            return None
-        success, _keys, keyvals = display.map_keycode(keycode)
-        if not success:
-            return None
-        for kv in keyvals:
-            if Gdk.KEY_a <= kv <= Gdk.KEY_z:
-                return chr(kv)
-            if Gdk.KEY_A <= kv <= Gdk.KEY_Z:
-                return chr(kv).lower()
-        return None
-
-    def _shortcut_matches(self, settings_key, is_ctrl, is_shift, letter):
-        """Whether the just-pressed combination (already broken down into
-        is_ctrl/is_shift/the physical key's resolved Latin letter — see
-        on_window_key_pressed/on_terminal_key_pressed) matches the
-        configurable shortcut stored under settings_key (a Gtk accelerator
-        name, e.g. "<Control>w" — see Settings -> General -> Keyboard
-        Shortcuts). Re-reads and re-parses the setting on every call
-        rather than caching: keypresses are infrequent enough for a plain
-        string parse to be a non-issue, and this way a change made in
-        Settings (or pulled in by Sync) takes effect on the very next
-        keypress with no extra wiring needed to invalidate a cache."""
-        accel = self.settings_manager.get(settings_key)
-        if not accel:
-            return False
-        success, keyval, mods = Gtk.accelerator_parse(accel)
-        if not success:
-            return False
-        want_ctrl = bool(mods & Gdk.ModifierType.CONTROL_MASK)
-        want_shift = bool(mods & Gdk.ModifierType.SHIFT_MASK)
-        want_letter = None
-        if Gdk.KEY_a <= keyval <= Gdk.KEY_z:
-            want_letter = chr(keyval)
-        elif Gdk.KEY_A <= keyval <= Gdk.KEY_Z:
-            want_letter = chr(keyval).lower()
-        return bool(is_ctrl) == want_ctrl and bool(is_shift) == want_shift and letter == want_letter
 
     def _resolve_physical_digit(self, keyval, keycode):
         """Digit-key counterpart to _resolve_latin_letter, same physical-
@@ -4739,271 +3213,3 @@ class ThongSSHWindow(Adw.ApplicationWindow):
         want_shift = bool(mods & Gdk.ModifierType.SHIFT_MASK)
         want_digit = chr(keyval) if Gdk.KEY_0 <= keyval <= Gdk.KEY_9 else None
         return bool(is_ctrl) == want_ctrl and bool(is_shift) == want_shift and digit == want_digit
-
-    def on_terminal_key_pressed(self, controller, keyval, keycode, modifier):
-        """Handles key presses directly on the Vte.Terminal widget."""
-        is_ctrl = modifier & Gdk.ModifierType.CONTROL_MASK
-        is_shift = modifier & Gdk.ModifierType.SHIFT_MASK
-        already_latin = (Gdk.KEY_a <= keyval <= Gdk.KEY_z) or (Gdk.KEY_A <= keyval <= Gdk.KEY_Z)
-        letter = self._resolve_latin_letter(keyval, keycode) if is_ctrl else None
-
-        if self._shortcut_matches("shortcuts.close_tab", is_ctrl, is_shift, letter):
-            self.on_menu_close_tab(None, None)
-            return True # Event handled, stop propagation
-
-        # Copy/Paste: Vte only binds the classic Shift+Insert/Ctrl+Insert
-        # copy-paste shortcuts itself, not the newer Ctrl+Shift+C/V
-        # convention these default to, so it has to be wired up explicitly
-        # here — both configurable (Settings -> General -> Keyboard
-        # Shortcuts), same as close_tab above.
-        if self._shortcut_matches("shortcuts.copy", is_ctrl, is_shift, letter):
-            self.on_menu_copy(None, None)
-            return True
-        if self._shortcut_matches("shortcuts.paste", is_ctrl, is_shift, letter):
-            self.on_menu_paste(None, None)
-            return True
-
-        # Any other Ctrl+<letter>: only step in when the active layout's own
-        # keyval *wasn't* already Latin (i.e. only the genuinely-broken
-        # case) — when it already was, leave it alone and let Vte's own
-        # (already-correct) handling run, so there's no risk of
-        # double-sending or subtly differing from it in the common case.
-        if is_ctrl and not is_shift and letter and not already_latin:
-            terminal = controller.get_widget()
-            terminal.feed_child(bytes([ord(letter) - ord('a') + 1]))
-            return True
-
-        return False # Not handled, allow terminal to process
-
-    def on_terminal_scroll(self, controller, dx, dy):
-        """Handles Ctrl+Scroll to change font size in the terminal."""
-        modifiers = controller.get_current_event_state()
-        if not (modifiers & Gdk.ModifierType.CONTROL_MASK):
-            return False # Propagate event if Ctrl is not held
-
-        terminal = controller.get_widget()
-        if not isinstance(terminal, Vte.Terminal):
-            return False
-
-        font_desc = terminal.get_font()
-        current_size_pts = font_desc.get_size() / Pango.SCALE
-
-        # dy < 0 is scroll up (zoom in), dy > 0 is scroll down (zoom out)
-        if dy < 0:
-            new_size_pts = current_size_pts + 1
-        else:
-            new_size_pts = current_size_pts - 1
-
-        font_desc.set_size(int(new_size_pts * Pango.SCALE))
-        terminal.set_font(font_desc)
-
-        return True # Event handled, stop propagation
-
-    # --- 6.4. Process Management ---
-    def on_tab_close_button_clicked(self, button, tab_widget, pid):
-        """Closes the tab immediately, then cleans up the underlying
-        process in the background — the user shouldn't have to wait
-        however long that process takes to actually exit just to see the
-        tab go away. This matters most for a "local" tab: it
-        runs the user's real login shell, and whether (and how fast) a
-        plain SIGTERM kills that depends entirely on their shell config
-        (traps, job control, a foreground child process) — previously the
-        tab visibly sat there the whole time that took, which in practice
-        was basically always a few seconds, not the rare edge case a
-        lightweight SSH/Telnet client would be. SSH/Telnet's own process
-        still gets signaled exactly as before; only the UI no longer
-        blocks on the result."""
-        self.close_tab(tab_widget)
-
-        logging.debug(f"Sending SIGTERM to process {pid}...")
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-
-        # SIGTERM is a request, not a guarantee. Give it a few seconds to
-        # exit cleanly on its own, then finish the job with SIGKILL if
-        # it's still around — purely a "don't leak the process" safety
-        # net at this point, invisible to the user since the tab is
-        # already gone.
-        def escalate_to_sigkill():
-            try:
-                os.kill(pid, signal.SIGKILL)
-                logging.debug(f"Process {pid} ignored SIGTERM; sent SIGKILL.")
-            except ProcessLookupError:
-                pass
-            return False
-        GLib.timeout_add_seconds(3, escalate_to_sigkill)
-
-    def on_ssh_process_exited(self, terminal, status, tab_widget):
-        """Handles the 'child-exited' signal from Vte.Terminal."""
-        logging.debug(f"VTE child process exited with status {status} for widget {tab_widget}.")
-
-        if tab_widget not in self.tab_data:
-            return  # already closed via on_tab_close_button_clicked
-
-        if self.settings_manager.get("terminal.close_on_disconnect"):
-            self.close_tab(widget=tab_widget)
-        else:
-            # Keep the tab open and show a message
-            exit_message = _("\n\n--- Session finished with exit code: {status} ---").format(status=status)
-            terminal.feed_child(exit_message.encode('utf-8'))
-            # Make the terminal read-only
-            terminal.set_input_enabled(False)
-            # Strike through the tab's name — the only visual cue this tab
-            # is dead, since it otherwise looks identical to a live one.
-            # Cleared again on a successful reconnect (see _continue_session).
-            tab_info = self.tab_data[tab_widget]
-            tab_info["disconnected"] = True
-            self._set_tab_label_disconnected(tab_info.get("tab_label"), True)
-            # Dead pid — no more /proc/<pid>/cwd to poll until a reconnect
-            # starts a fresh timer (see _continue_session).
-            self._stop_local_cwd_tracking(tab_widget)
-
-    def _set_tab_label_disconnected(self, tab_label, disconnected):
-        """Toggles the strikethrough on a terminal tab's label text — the
-        visual cue that its session has ended but the tab itself was kept
-        open (see terminal.close_on_disconnect)."""
-        if tab_label is None:
-            return
-        attrs = Pango.AttrList()
-        attrs.insert(Pango.attr_strikethrough_new(disconnected))
-        tab_label.set_attributes(attrs)
-
-    def close_tab(self, widget):
-        """
-        Closes a tab, removes it from whichever pane notebook currently holds
-        it, and cleans up associated resources like session data and timers.
-
-        Idempotent: closing a tab no longer waits for its process to exit
-        (see on_tab_close_button_clicked), so "child-exited" can still fire
-        later for a tab this already closed — a no-op in that case rather
-        than a stray warning.
-        """
-        if widget not in self.open_sessions and widget not in self.tab_data:
-            return
-
-        owner = self._find_notebook_for_page_widget(widget)
-        if owner is not None:
-            page_num = owner.page_num(widget)
-            if page_num != -1:
-                owner.remove_page(page_num)
-        else:
-            logging.warning("Attempted to close a tab that is not in any pane.")
-
-        if widget in self.open_sessions:
-            del self.open_sessions[widget]
-
-        if widget in self.tab_data:
-            self._stop_session_logging(widget)
-            self._stop_local_cwd_tracking(widget)
-            del self.tab_data[widget]
-
-        if owner is not None and owner.get_n_pages() > 0:
-            def focus_active_terminal():
-                active_terminal = self.get_active_terminal()
-                if active_terminal: active_terminal.grab_focus()
-            GLib.idle_add(focus_active_terminal)
-
-    # --- Tab Context Menu Handlers ---
-    def on_menu_tab_disconnect(self, action, param):
-        """Closes the currently active tab."""
-        page_widget = self._get_target_tab_widget()
-        if not page_widget:
-            return
-
-        # For terminal, gracefully kill process. For SFTP, just remove.
-        if page_widget in self.open_sessions:
-            terminal, pid = self.open_sessions[page_widget]
-            self.on_tab_close_button_clicked(None, page_widget, pid)
-        else:
-            self.close_tab(page_widget)
-
-    def on_menu_tab_reconnect(self, action, param):
-        """Reconnects the current tab without closing it."""
-        page_widget = self._get_target_tab_widget()
-        if not page_widget:
-            return
-
-        if page_widget in self.tab_data:
-            tab_info = self.tab_data[page_widget]
-
-            if tab_info["type"] == "terminal":
-                logging.debug(f"Reconnecting terminal tab in place for config: {tab_info['config']['name']}")
-                # Get the terminal widget for this specific page_widget
-                if page_widget in self.open_sessions:
-                    terminal, old_pid = self.open_sessions[page_widget]
-                    # Reset terminal state
-                    terminal.reset(True, True)
-                    terminal.set_input_enabled(True)
-                    # Re-run the full session start logic to handle username prompts correctly
-                    self.start_session(tab_info['config'], existing_terminal_widget=page_widget)
-                else: # Fallback to old behavior if something is wrong
-                    # This part is tricky. Reconnecting should not require killing the process.
-                    # Let's reset the terminal and re-run the command.
-                    self.on_menu_tab_disconnect(None, None)
-                    self.start_session(tab_info["config"])
-
-            elif tab_info["type"] == "sftp":
-                # For SFTP, we can use its internal reconnect method
-                if hasattr(page_widget, 'reconnect'):
-                    page_widget.reconnect()
-                else: # Fallback
-                    self.on_menu_tab_disconnect(None, None)
-                    self.on_menu_open_sftp(None, None)
-
-    def on_menu_tab_duplicate(self, action, param):
-        """Opens a new tab with the same config as the selected tab."""
-        target_widget = self._get_target_tab_widget()
-        if target_widget and target_widget in self.tab_data:
-            tab_info = self.tab_data[target_widget]
-            
-            # Re-select the original host in the tree for clarity if cloning SFTP
-            if tab_info["type"] == "sftp":
-                # This is complex, for now, just open a new SFTP based on config
-                sftp_view = SftpWidget(tab_info["config"])
-                tab_label_box, close_btn, _tab_label = self._create_tab_label("folder-remote-symbolic", tab_info["config"]['name'])
-                target_notebook = self._get_active_notebook()
-                page_num = target_notebook.append_page(sftp_view, tab_label_box)
-                self._mark_tab_draggable(target_notebook, sftp_view)
-                target_notebook.set_current_page(page_num)
-                close_btn.connect("clicked", lambda btn: self.close_tab(sftp_view))
-                self.tab_data[sftp_view] = {"type": "sftp", "config": tab_info["config"]}
-            else: # terminal
-                 self.start_session(tab_info["config"])
-
-    def on_notebook_scroll_switch(self, controller, dx, dy):
-        """Handles mouse wheel scrolling over a tab label to switch tabs
-        within whichever pane that tab currently belongs to."""
-        tab_label_box = controller.get_widget()
-        notebook, _page_widget = self._find_pane_by_tab_label(tab_label_box)
-        if notebook is None:
-            return False
-
-        # dy < 0 is scroll up, dy > 0 is scroll down
-        n_pages = notebook.get_n_pages()
-        if n_pages < 2:
-            return False # Don't handle if there's nothing to switch to
-
-        current_page = notebook.get_current_page()
-
-        if dy < 0: # Scroll Up -> Previous Tab
-            new_page = (current_page - 1 + n_pages) % n_pages
-        elif dy > 0: # Scroll Down -> Next Tab
-            new_page = (current_page + 1) % n_pages
-        else:
-            return False # No vertical scroll
-
-        notebook.set_current_page(new_page)
-        return True # Event handled, stop propagation
-
-    def on_menu_open_ssh_from_tab(self, action, param):
-        """Opens a terminal session based on the current SFTP tab's config."""
-        page_widget = self._get_target_tab_widget()
-        if not page_widget:
-            return
-
-        if page_widget in self.tab_data:
-            tab_info = self.tab_data[page_widget]
-            if tab_info["type"] == "sftp":
-                self.start_session(tab_info["config"])

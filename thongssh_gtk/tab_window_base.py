@@ -40,6 +40,23 @@ from .i18n import _
 _PCRE2_CASELESS = 0x00000008
 _PCRE2_MULTILINE = 0x00000400
 
+
+def _tabview_has_page(tabview, page):
+    """Whether `page` is currently one of `tabview`'s own pages — safe to
+    call with a page that belongs to some OTHER view entirely (returns
+    False), unlike Adw.TabView.get_page_position() itself: passing it a
+    page that isn't one of its own doesn't return -1 the way its int
+    return type suggests, it raises a loud (but non-fatal)
+    'page_belongs_to_this_view' assertion CRITICAL — confirmed live while
+    testing _find_tabview_for_page below scanning every pane for a page
+    that only ever lives in one of them. Walking get_nth_page() instead
+    never passes a foreign page into anything, so it can't trip that
+    assertion."""
+    for i in range(tabview.get_n_pages()):
+        if tabview.get_nth_page(i) is page:
+            return True
+    return False
+
 # WATERMARK_POSITIONS (constants.py) ids -> (halign, valign) for the
 # terminal watermark overlay — every id there must have an entry here.
 _WATERMARK_ALIGN = {
@@ -291,7 +308,7 @@ class TerminalPaneWindow(Adw.ApplicationWindow):
         ThongSSHWindow overrides this to search all 4 of its split panes,
         since the target page may not be in the currently-active one."""
         tabview = self._get_active_tabview()
-        if tabview is not None and tabview.get_page_position(page) != -1:
+        if tabview is not None and _tabview_has_page(tabview, page):
             return tabview
         return None
 
