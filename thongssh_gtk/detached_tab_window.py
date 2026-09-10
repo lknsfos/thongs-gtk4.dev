@@ -14,6 +14,7 @@ extra code here).
 """
 
 import os
+import logging
 
 from gi.repository import Gtk, Adw, GLib, Gio, Gdk, GObject
 
@@ -48,6 +49,22 @@ class DetachedTabWindow(TerminalPaneWindow):
         header_bar.set_show_end_title_buttons(True)  # native close/min/max
         self.window_title = Adw.WindowTitle(title="ThongSSH")
         header_bar.set_title_widget(self.window_title)
+        # Adw.TabBar's own native drag-to-detach/drag-to-reattach only ever
+        # engages when the SOURCE view has more than one page (confirmed
+        # against libadwaita's own source — adw-tab-box.c's drag gesture is
+        # gated on `adw_tab_view_get_n_pages (view) > 1`, specifically so a
+        # window's only remaining tab can't be dragged away and leave it
+        # empty). A DetachedTabWindow's tabview is, by construction, almost
+        # always down to exactly one page — meaning the very drag gesture
+        # this window most needs (dragging its lone tab back onto the main
+        # window) is the one case libadwaita's own TabBar refuses to start
+        # at all. This button is the explicit, drag-independent way around
+        # that — the same relationship "Detach" in the tab menu already has
+        # to the *other* direction.
+        attach_btn = Gtk.Button(icon_name="go-up-symbolic")
+        attach_btn.set_tooltip_text(_("Attach to Main Window"))
+        attach_btn.connect("clicked", self.on_attach_to_main_clicked)
+        header_bar.pack_start(attach_btn)
         outer_box.append(header_bar)
         self._title_binding = None
 
@@ -132,6 +149,29 @@ class DetachedTabWindow(TerminalPaneWindow):
         cwd = os.environ.get("HOME", os.path.expanduser("~"))
         label = self._dir_short_label(cwd)
         self.start_session({"name": f"local: {label}", "protocol": "local", "cwd": cwd})
+
+    def on_attach_to_main_clicked(self, button):
+        """The explicit, always-working counterpart to "Detach" — see the
+        header-bar button's own construction comment for why dragging a
+        lone tab (the state this window is almost always in) doesn't work
+        through Adw.TabBar's native mechanism at all. Moves the currently
+        selected page into whichever pane is the main window's own active
+        one, via the exact same transfer_page() primitive a working drag
+        would have used — this window auto-closes afterward via
+        on_tabview_page_detached below, same as a successful drag."""
+        page = self.tabview.get_selected_page()
+        if page is None:
+            return
+        main_window = next(
+            (w for w in self.get_application().get_windows() if not isinstance(w, DetachedTabWindow)),
+            None,
+        )
+        if main_window is None:
+            logging.warning("Attach to Main Window: no main window found (only detached windows are open?).")
+            return
+        dest_tabview = main_window._get_active_tabview()
+        self.tabview.transfer_page(page, dest_tabview, dest_tabview.get_n_pages())
+        main_window.present()
 
     def on_tabview_page_detached(self, tabview, page, position):
         """Once this window's one-and-only pane has lost its last tab
