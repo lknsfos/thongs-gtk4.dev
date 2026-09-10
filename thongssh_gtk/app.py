@@ -23,14 +23,51 @@ except ValueError as e:
 
 from gi.repository import Adw, Gio, Gtk, GdkPixbuf, GLib
 from .window import ThongSSHWindow # Keep relative import
+from .detached_tab_window import DetachedTabWindow
 from .constants import APP_ID, resource_path # Import our new function
 from .settings import SettingsManager
+from .keyring import KeyringManager
 from . import i18n
+
+# Trampoline map for the app-scoped tab-menu actions (see __init__ below):
+# action name -> the explicit-page-argument method to call on whichever
+# window currently owns the clicked tab. These mirror already-existing
+# win.* actions/handlers (window.py), just resolved via
+# self.last_clicked_tab_page instead of a window-local "last clicked tab"
+# — see this class's own comment on why win.* can't reach across windows.
+_APP_TAB_ACTION_METHODS = {
+    "tab-disconnect": "on_menu_tab_disconnect",
+    "tab-reconnect": "on_menu_tab_reconnect",
+    "tab-duplicate": "on_menu_tab_duplicate",
+    "tab-detach": "detach_tab_page",
+    "open-sftp": "open_sftp_for_tab_page",
+    "open-ssh-from-tab": "on_menu_open_ssh_from_tab",
+}
 
 # --- Application Class ---
 class ThongSSHApp(Adw.Application):
     def __init__(self, **kwargs):
         super().__init__(application_id=APP_ID, **kwargs)
+
+        # Real singletons, one per running app instance — NOT per-window.
+        # Before detachable tabs, ThongSSHWindow.open_sessions/tab_data/
+        # last_clicked_tab were plain CLASS attributes (shared across any
+        # instances, since a second top-level window never existed) and
+        # SettingsManager()/KeyringManager() were instantiated fresh per
+        # window — both only "worked" by accident. A DetachedTabWindow
+        # makes that untrue: every window (main + every detached one)
+        # aliases these same objects, so a tab moved between windows (or
+        # a Settings change made from the main window) is immediately and
+        # correctly visible everywhere.
+        self.settings_manager = SettingsManager()
+        self.keyring = KeyringManager()
+        self.tab_data = {}
+        self.open_sessions = {}
+        # Holds the Adw.TabPage last right-clicked (or menu-button-
+        # activated) in ANY window's tab strip — see TerminalPaneWindow.
+        # on_tabview_setup_menu and the app-scoped tab actions below.
+        self.last_clicked_tab_page = None
+
         # ✨ Register resources in the constructor, BEFORE creating the window
         try:
             res_path = resource_path("thongssh.gresource") # Use the helper function
@@ -45,7 +82,75 @@ class ThongSSHApp(Adw.Application):
         # Must run before ThongSSHWindow is constructed, so every widget
         # in it is built with the right direction from the start.
         i18n.apply_language_direction()
+        self._setup_tab_actions()
         self.connect('activate', self.on_activate)
+
+    def _setup_tab_actions(self):
+        """Registers the app-scoped (not window-scoped) tab-menu actions —
+        see TerminalPaneWindow.on_tabview_setup_menu / _build_tab_menu_model
+        for where these are referenced ("app.tab-disconnect", etc.) and
+        window.py's own module docstring/comments for why win.* couldn't
+        be used instead: a menu inside a DetachedTabWindow can never
+        resolve an action registered only on the main ThongSSHWindow's own
+        action map, but "which tab was right-clicked" is naturally
+        app-wide context, so these are registered here instead. Each is a
+        thin trampoline: resolve the clicked Adw.TabPage
+        (last_clicked_tab_page), resolve ITS current owning window (not
+        necessarily the window this menu happened to be shown in — a page
+        can outlive being dragged elsewhere), and call a same-shaped
+        explicit-page-argument method on that window."""
+        for action_name, method_name in _APP_TAB_ACTION_METHODS.items():
+            action = Gio.SimpleAction.new(action_name, None)
+            action.connect("activate", self._on_tab_action, method_name)
+            self.add_action(action)
+
+        for field in ("name", "address", "userhost"):
+            action = Gio.SimpleAction.new(f"copy-host-{field}", None)
+            action.connect("activate", self._on_copy_host_action, field)
+            self.add_action(action)
+
+    def _resolve_tab_action_window(self):
+        """The window CURRENTLY hosting self.last_clicked_tab_page — not
+        necessarily the window whose tab strip the menu was shown in,
+        since transfer_page() never rebinds anything; get_root() always
+        reflects the page's real, current parent window."""
+        page = self.last_clicked_tab_page
+        if page is None:
+            return None
+        child = page.get_child()
+        if child is None:
+            return None
+        return child.get_root()
+
+    def _on_tab_action(self, action, param, method_name):
+        page = self.last_clicked_tab_page
+        window = self._resolve_tab_action_window()
+        if window is None:
+            return
+        method = getattr(window, method_name, None)
+        if method is None:
+            logging.warning(f"App tab action '{action.get_name()}': window has no method '{method_name}'.")
+            return
+        if method_name == "detach_tab_page" or method_name == "open_sftp_for_tab_page":
+            method(page)
+        else:
+            method(None, None, page=page)
+
+    def _on_copy_host_action(self, action, param, field):
+        page = self.last_clicked_tab_page
+        window = self._resolve_tab_action_window()
+        if window is None:
+            return
+        window.copy_host_field_for_tab_page(page, field)
+
+    def create_detached_window(self):
+        """Builds a new DetachedTabWindow (not presented — the caller
+        decides when: the "create-window" TabView signal handler needs it
+        unpresented-but-realized-enough for the native drag machinery to
+        finish transferring the page into it, while detach_tab_page's
+        menu-driven path presents explicitly after its own transfer_page
+        call)."""
+        return DetachedTabWindow(application=self)
 
     def apply_macos_dock_icon(self):
         # GTK's icon-theme machinery (set_icon_name, etc.) has no reach into
@@ -64,7 +169,7 @@ class ThongSSHApp(Adw.Application):
         except ImportError:
             logging.warning("Dock icon: pyobjc-framework-Cocoa not installed; skipping native Dock icon.")
             return
-        icon_stem = SettingsManager().get("interface.icon")
+        icon_stem = self.settings_manager.get("interface.icon")
         # icons/<stem>.png (used everywhere else — GTK window icon, Linux
         # hicolor/.desktop) has a soft alpha fade at the edges, by design:
         # it's meant to blend into whatever's behind it, which is exactly
@@ -115,7 +220,7 @@ def main():
     @atexit.register
     def kill_all_sessions():
         logging.info("Exiting... Killing all active sessions.")
-        for term, pid in ThongSSHWindow.open_sessions.values():
+        for term, pid in app.open_sessions.values():
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
