@@ -22,6 +22,7 @@ from .cli_providers import is_available as cli_is_available
 from .dialogs import InputDialog, HostDialog, GroupDialog, BatchCommandDialog, QuickyDialog # Removed SettingsDialog
 from .config import load_and_migrate_config, save_config, CONFIG_DIR
 from .tab_window_base import TerminalPaneWindow, _tabview_has_page
+from .detached_tab_window import DetachedTabWindow
 from .launcher_icon import apply_launcher_icon
 from .sftp_widget import SftpWidget
 from .ai_panel import AiPanel
@@ -1131,24 +1132,64 @@ class ThongSSHWindow(TerminalPaneWindow):
         return None
 
     def _get_region_options(self):
-        """The (key, label) pane regions selectable for the current split
-        mode — used by BatchCommandDialog's div filter. Empty when there's
-        only one pane (nothing to filter by)."""
+        """The (key, label) regions selectable in Batch Command's div
+        filter: the current split-mode's panes, PLUS one entry per
+        currently-open detached window. A detached tab is conceptually
+        just another "div" the user split off (the user's own framing,
+        after "it kind of breaks the Batch Command concept" — a detached
+        tab visibly disappearing from Batch Command the moment ANY split
+        filtering exists at all, rather than getting its own filterable
+        entry, was a real bug, not the "acceptable emergent behavior" it
+        was first assumed to be) — so it gets a real entry here instead of
+        silently falling through _find_region_key_for_page as unfiltered/
+        excluded. Empty only when there's a single pane AND no detached
+        windows open (nothing at all to filter by)."""
         if self.split_mode == "vertical":
-            return [("left", _("Left")), ("right", _("Right"))]
+            options = [("left", _("Left")), ("right", _("Right"))]
         elif self.split_mode == "horizontal":
-            return [("top", _("Top")), ("bottom", _("Bottom"))]
+            options = [("top", _("Top")), ("bottom", _("Bottom"))]
         elif self.split_mode == "grid":
-            return [
+            options = [
                 ("top-left", _("Top-Left")), ("top-right", _("Top-Right")),
                 ("bottom-left", _("Bottom-Left")), ("bottom-right", _("Bottom-Right")),
             ]
-        return []
+        else:
+            options = []
+        detached_windows = self._get_detached_windows()
+        if detached_windows:
+            if not options:
+                # No split active — the single unsplit pane needs its OWN
+                # region entry now too, or its own tabs would have nowhere
+                # to belong the moment a detached-window entry exists at
+                # all (every open tab needs SOME matching checkbox, or
+                # region filtering silently excludes it — exactly the bug
+                # a detached tab itself used to hit, just shifted onto the
+                # main pane's tabs instead).
+                options.append(("main", _("Main Window")))
+            for win in detached_windows:
+                title = win.window_title.get_title() or _("Detached")
+                options.append((f"detached:{id(win)}", _("Detached: {title}").format(title=title)))
+        return options
+
+    def _get_detached_windows(self):
+        """Every currently-open DetachedTabWindow — used by
+        _get_region_options/_find_region_key_for_page. Order isn't
+        guaranteed beyond whatever Gtk.Application.get_windows() returns,
+        which is fine here (each is labeled by its own live title, not by
+        position)."""
+        return [w for w in self.get_application().get_windows() if isinstance(w, DetachedTabWindow)]
 
     def _pane_region_label(self, tabview):
-        """Maps a pane's TabView to its region key under the current split
-        mode (see _get_region_options). None if there's nothing to filter."""
-        if tabview is None or self.split_mode is None:
+        """Maps one of THIS window's own pane TabViews to its region key
+        under the current split mode (see _get_region_options) — "main"
+        when there's no split active at all (only actually consulted when
+        _get_region_options() emitted a "main" option too, which it only
+        does once a detached window exists; harmless otherwise, since
+        nothing looks at region labels while region_checks is empty).
+        None if `tabview` isn't one of this window's 4 panes at all —
+        callers that also need to recognize a detached window's own pane
+        should use _find_region_key_for_page instead, which checks both."""
+        if tabview is None:
             return None
         p0, p1, p2, p3 = self.pane_tabviews
         if self.split_mode == "vertical":
@@ -1157,6 +1198,24 @@ class ThongSSHWindow(TerminalPaneWindow):
             return {p0: "top", p1: "bottom"}.get(tabview)
         elif self.split_mode == "grid":
             return {p0: "top-left", p1: "top-right", p2: "bottom-left", p3: "bottom-right"}.get(tabview)
+        elif tabview in (p0, p1, p2, p3):
+            return "main"
+        return None
+
+    def _find_region_key_for_page(self, page):
+        """Which region key (see _get_region_options) currently holds
+        `page` — one of this window's own split panes, or a currently-open
+        detached window's single pane. Used by BatchCommandDialog instead
+        of the old _find_tabview_for_page()+_pane_region_label() combo,
+        which had no way to represent "this tab lives in a detached
+        window" at all and silently excluded it from every filtered
+        result instead."""
+        tabview = self._find_tabview_for_page(page)
+        if tabview is not None:
+            return self._pane_region_label(tabview)
+        for win in self._get_detached_windows():
+            if _tabview_has_page(win.tabview, page):
+                return f"detached:{id(win)}"
         return None
 
     def _move_all_tabs(self, src, dest):

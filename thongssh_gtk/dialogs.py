@@ -2849,13 +2849,13 @@ class BatchCommandDialog(Adw.Window):
             if page_widget not in self.parent_window.open_sessions:
                 continue
             if active_regions is not None:
-                # A tab currently living in a DetachedTabWindow naturally
-                # resolves to None here (ThongSSHWindow._find_tabview_for_page
-                # only searches this window's own 4 split panes) — excluded
-                # from region-filtered results, still included when
-                # unfiltered/"All". Acceptable emergent behavior, not a bug.
-                owner_pane = self.parent_window._find_tabview_for_page(page_widget)
-                if self.parent_window._pane_region_label(owner_pane) not in active_regions:
+                # Covers both this window's own split panes AND any
+                # currently-open detached window's single pane — see
+                # _find_region_key_for_page's own docstring for why the
+                # older two-step lookup silently excluded detached tabs
+                # instead of giving them their own filterable entry.
+                region_key = self.parent_window._find_region_key_for_page(page_widget)
+                if region_key not in active_regions:
                     continue
             name = info.get("config", {}).get("name", _("Unnamed"))
             check = Gtk.CheckButton(label=name, active=True)
